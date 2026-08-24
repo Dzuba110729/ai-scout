@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Изменение — AI-Скаут{% endblock %}
+{% block content %}
+{% if not change %}
+<p class="muted">Изменение не найдено.</p>
+{% else %}
+<a class="link" href="/changes">← к ленте изменений</a>
+<h1>{{ change.page.competitor.name }}</h1>
+<p class="muted"><a class="link" href="{{ change.page.url }}" target="_blank">{{ change.page.url }}</a></p>
+<span class="badge badge-{{ change.change_type.value }}">
+    {% if change.change_type.value == "new" %}новая страница
+    {% elif change.change_type.value == "changed" %}изменение
+    {% else %}удалена{% endif %}
+</span>
+<p class="muted">{{ change.detected_at.strftime("%d.%m.%Y %H:%M") }}</p>
+
+{% if change.ai_analysis %}
+<div class="card">
+    <h3>ИИ-анализ</h3>
+    {% if change.ai_analysis.category %}<p><strong>Категория:</strong> {{ change.ai_analysis.category }}</p>{% endif %}
+    {% if change.ai_analysis.usp %}<p><strong>УТП:</strong> {{ change.ai_analysis.usp }}</p>{% endif %}
+    {% if change.ai_analysis.cta %}<p><strong>CTA:</strong> {{ change.ai_analysis.cta }}</p>{% endif %}
+    {% if change.ai_analysis.summary %}<p>{{ change.ai_analysis.summary }}</p>{% endif %}
+</div>
+{% endif %}
+
+{% if change.change_type.value == "changed" and change.diff_text %}
+<div class="card">
+    <h3>Было / стало</h3>
+    <pre class="diff">{% for line in change.diff_text.split("\n") -%}
+{% if line.startswith("+") %}<span class="add">{{ line }}</span>
+{%- elif line.startswith("-") %}<span class="del">{{ line }}</span>
+{%- else %}{{ line }}
+{%- endif %}
+{% endfor %}</pre>
+</div>
+{% elif change.change_type.value == "new" and change.new_snapshot %}
+<div class="card">
+    <h3>Содержимое</h3>
+    <div class="page-content">
+    {% for line in change.new_snapshot.text_content[:3000].split("\n") %}
+        {% if line.strip() %}<p>{{ line }}</p>{% endif %}
+    {% endfor %}
+    </div>
+</div>
+{% elif change.change_type.value == "removed" and change.old_snapshot %}
+<div class="card">
+    <h3>Было (до удаления)</h3>
+    <div class="page-content">
+    {% for line in change.old_snapshot.text_content[:3000].split("\n") %}
+        {% if line.strip() %}<p>{{ line }}</p>{% endif %}
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

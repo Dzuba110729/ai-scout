@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scout
+      POSTGRES_PASSWORD: scout
+      POSTGRES_DB: ai_scout
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - db
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://scout:scout@db:5432/ai_scout
+    volumes:
+      - storage_states:/app/storage_states
+      # Учётные данные подписки Claude Code CLI (см. README) — без них ИИ-анализ не заработает.
+      - ~/.claude:/root/.claude:ro
+    ports:
+      - "8888:8888"
+
+volumes:
+  db_data:
+  storage_states:
