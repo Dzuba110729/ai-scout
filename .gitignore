@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .env
 storage_states/
+client_secret*.json
+google_oauth_token.json
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
