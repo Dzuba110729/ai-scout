@@ -1,50 +1,43 @@
 {% extends "base.html" %}
+{% from "_change_card.html" import change_card %}
 {% block title %}Лента изменений — AI-Скаут{% endblock %}
 {% block content %}
 <h1>Лента изменений</h1>
 
-{% if not groups %}
-<p class="muted">Изменений пока нет.</p>
+<form class="filter-bar" method="get" action="/changes">
+    <label class="field">
+        Конкурент
+        <select name="competitor_id">
+            <option value="">Все</option>
+            {% for c in all_competitors %}
+            <option value="{{ c.id }}" {{ "selected" if filters.competitor_id == c.id else "" }}>{{ c.name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label class="field">
+        Тип
+        <select name="change_type">
+            <option value="">Все</option>
+            <option value="new" {{ "selected" if filters.change_type == "new" else "" }}>Новая страница</option>
+            <option value="changed" {{ "selected" if filters.change_type == "changed" else "" }}>Изменение</option>
+            <option value="removed" {{ "selected" if filters.change_type == "removed" else "" }}>Удалена</option>
+        </select>
+    </label>
+    <label class="field">
+        Поиск по URL
+        <input type="text" name="q" value="{{ filters.q or '' }}" placeholder="/pricing">
+    </label>
+    <button type="submit">Применить</button>
+    {% if filters.competitor_id or filters.change_type or filters.q %}
+    <a class="btn secondary-btn" style="text-decoration:none;" href="/changes">Сбросить</a>
+    {% endif %}
+</form>
+
+{% if not changes %}
+<p class="muted">По этим фильтрам изменений не найдено.</p>
 {% else %}
-<div style="margin-bottom:12px; display:flex; gap:8px;">
-    <button type="button" id="expand-all">Развернуть все</button>
-    <button type="button" id="collapse-all">Свернуть все</button>
-</div>
-{% endif %}
-
-{% for group in groups %}
-<details class="competitor-group" {{ "open" if loop.first else "" }}>
-    <summary>
-        <strong>{{ group.competitor.name }}</strong>
-        <span class="muted">— {{ group.changes|length }} изменени{{ "е" if group.changes|length == 1 else "й" }}</span>
-    </summary>
-    <div class="competitor-group-body">
-        {% for change in group.changes %}
-        <a class="link" href="/changes/{{ change.id }}">
-        <div class="card change-card">
-            <span class="badge badge-{{ change.change_type.value }}">
-                {% if change.change_type.value == "new" %}новая страница
-                {% elif change.change_type.value == "changed" %}изменение
-                {% else %}удалена{% endif %}
-            </span>
-            <div class="muted">{{ change.page.url }}</div>
-            <div class="muted">{{ change.detected_at.strftime("%d.%m.%Y %H:%M") }}</div>
-            {% if change.ai_analysis and change.ai_analysis.summary %}
-            <p>{{ change.ai_analysis.summary }}</p>
-            {% endif %}
-        </div>
-        </a>
-        {% endfor %}
-    </div>
-</details>
+{% for change in changes %}
+    {{ change_card(change, show_competitor=True) }}
 {% endfor %}
-
-<script>
-document.getElementById("expand-all")?.addEventListener("click", () => {
-    document.querySelectorAll(".competitor-group").forEach((el) => { el.open = true; });
-});
-document.getElementById("collapse-all")?.addEventListener("click", () => {
-    document.querySelectorAll(".competitor-group").forEach((el) => { el.open = false; });
-});
-</script>
+{% endif %}
 {% endblock %}

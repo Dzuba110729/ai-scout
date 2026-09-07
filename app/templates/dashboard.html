@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_change_card.html" import change_card %}
+{% block title %}Дашборд — AI-Скаут{% endblock %}
+{% block content %}
+<h1>Дашборд</h1>
+
+<div class="stat-grid">
+    <div class="stat-tile">
+        <div class="value">{{ stats.total }}</div>
+        <div class="label">Всего конкурентов</div>
+    </div>
+    <div class="stat-tile">
+        <div class="value">{{ stats.active }}</div>
+        <div class="label">Активны</div>
+    </div>
+    <div class="stat-tile {{ 'attention' if stats.needs_session else '' }}">
+        <div class="value">{{ stats.needs_session }}</div>
+        <div class="label">Нужна ручная сессия</div>
+    </div>
+    <div class="stat-tile">
+        <div class="value">{{ stats.changes_last_7d }}</div>
+        <div class="label">Изменений за 7 дней</div>
+    </div>
+</div>
+
+{% if attention_competitors %}
+<div class="card">
+    <h2>Требуют внимания</h2>
+    {% for c in attention_competitors %}
+    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; {{ 'border-top:1px solid var(--border);' if not loop.first else '' }}">
+        <div>
+            <a class="link" href="/competitors/{{ c.id }}"><strong>{{ c.name }}</strong></a>
+            <span class="badge badge-{{ c.status.value }}">нужна ручная сессия</span>
+        </div>
+        <span class="muted">{{ c.base_url }}</span>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>Последние изменения</h2>
+    {% if not recent_changes %}
+    <p class="muted">Изменений пока нет.</p>
+    {% else %}
+    {% for change in recent_changes %}
+        {{ change_card(change, show_competitor=True) }}
+    {% endfor %}
+    <a class="link" href="/changes">Вся лента изменений →</a>
+    {% endif %}
+</div>
+{% endblock %}

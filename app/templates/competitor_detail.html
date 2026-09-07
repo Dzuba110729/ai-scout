@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% from "_change_card.html" import change_card %}
+{% block title %}{{ competitor.name }} — AI-Скаут{% endblock %}
+{% block content %}
+{% if not competitor %}
+<p class="muted">Конкурент не найден.</p>
+{% else %}
+<div class="breadcrumb"><a class="link" href="/competitors">← к списку конкурентов</a></div>
+
+<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:20px;">
+    <div>
+        <h1 style="margin:0 0 4px;">{{ competitor.name }}</h1>
+        <span class="muted">{{ competitor.base_url }}</span>
+    </div>
+    <div style="display:flex; gap:8px;">
+        {% if competitor.google_drive_folder_url %}
+        <a class="btn secondary-btn" style="text-decoration:none;" href="{{ competitor.google_drive_folder_url }}" target="_blank" rel="noopener">Отчёты</a>
+        {% endif %}
+    </div>
+</div>
+
+<div class="tabs">
+    <button type="button" class="tab-btn active" data-tab="overview">Обзор</button>
+    <button type="button" class="tab-btn" data-tab="pages">Страницы ({{ pages|length }})</button>
+    <button type="button" class="tab-btn" data-tab="history">История изменений ({{ changes|length }})</button>
+</div>
+
+<div class="tab-panel active" data-tab-panel="overview">
+    <div class="card">
+        <div style="display:flex; gap:24px; flex-wrap:wrap; margin-bottom:12px;">
+            <div>
+                <div class="muted">Статус</div>
+                <span class="badge badge-{{ competitor.status.value }}">
+                    {% if competitor.status.value == "active" %}активна
+                    {% elif competitor.status.value == "needs_session" %}нужна ручная сессия
+                    {% else %}на паузе{% endif %}
+                </span>
+                {% if competitor.is_paused %}<span class="badge badge-paused">пауза</span>{% endif %}
+            </div>
+            <div>
+                <div class="muted">Последний обход</div>
+                {{ competitor.last_crawl_finished_at.strftime("%d.%m.%Y %H:%M") if competitor.last_crawl_finished_at else "ещё не было" }}
+            </div>
+            <div>
+                <div class="muted">Следующий обход</div>
+                <span class="next-crawl" data-next-crawl-at="{{ competitor.next_crawl_at.isoformat() if competitor.next_crawl_at and not competitor.is_paused else '' }}">
+                    {% if competitor.is_paused %}на паузе{% endif %}
+                </span>
+            </div>
+        </div>
+        <div style="display:flex; gap:8px;">
+            {% if competitor.is_crawling %}
+            <button type="button" disabled>Обход идёт…</button>
+            {% else %}
+            <button type="button" class="action-btn" data-action="/api/competitors/{{ competitor.id }}/crawl">Обойти сейчас</button>
+            {% endif %}
+            <button type="button" class="action-btn secondary-btn" data-action="/api/competitors/{{ competitor.id }}/{{ 'resume' if competitor.is_paused else 'pause' }}">{{ 'Снять с паузы' if competitor.is_paused else 'Пауза' }}</button>
+            <button type="button" class="action-btn danger-btn" data-action="/api/competitors/{{ competitor.id }}"
+                    data-method="DELETE" data-confirm="Удалить конкурента «{{ competitor.name }}» и всю историю по нему?"
+                    data-redirect="/competitors">Удалить</button>
+        </div>
+    </div>
+</div>
+
+<div class="tab-panel" data-tab-panel="pages">
+    {% if not pages %}
+    <p class="muted">Страницы появятся после первого обхода.</p>
+    {% else %}
+    <div class="card" style="padding:0;">
+        <table class="data-table">
+            <thead>
+                <tr><th>URL</th><th>Заголовок</th><th>Впервые увидена</th><th>Обновлена</th><th></th></tr>
+            </thead>
+            <tbody>
+                {% for page in pages %}
+                <tr>
+                    <td><a class="link" href="{{ page.url }}" target="_blank" rel="noopener">{{ page.url }}</a></td>
+                    <td class="muted">{{ page.title or "—" }}</td>
+                    <td class="muted">{{ page.first_seen_at.strftime("%d.%m.%Y") }}</td>
+                    <td class="muted">{{ page.last_seen_at.strftime("%d.%m.%Y") }}</td>
+                    <td>{% if page.is_removed %}<span class="badge badge-removed">удалена</span>{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<div class="tab-panel" data-tab-panel="history">
+    {% if not changes %}
+    <p class="muted">Изменений по этому конкуренту пока нет.</p>
+    {% else %}
+    {% for change in changes %}
+        {{ change_card(change) }}
+    {% endfor %}
+    {% endif %}
+</div>
+
+<script>
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+        document.querySelector(`.tab-panel[data-tab-panel="${btn.dataset.tab}"]`).classList.add("active");
+    });
+});
+
+function formatCountdown(ms) {
+    if (ms <= 0) return "обход вот-вот начнётся";
+    const totalMinutes = Math.floor(ms / 60000);
+    const days = Math.floor(totalMinutes / (60 * 24));
+    const hours = Math.floor((totalMinutes % (60 * 24)) / 60);
+    const minutes = totalMinutes % 60;
+    const parts = [];
+    if (days) parts.push(`${days} д`);
+    if (hours) parts.push(`${hours} ч`);
+    if (!days && minutes) parts.push(`${minutes} мин`);
+    return `через ${parts.join(" ") || "меньше минуты"}`;
+}
+function updateCountdowns() {
+    document.querySelectorAll(".next-crawl[data-next-crawl-at]").forEach((el) => {
+        const value = el.dataset.nextCrawlAt;
+        if (!value) return;
+        const diff = new Date(value).getTime() - Date.now();
+        el.textContent = formatCountdown(diff);
+    });
+}
+updateCountdowns();
+setInterval(updateCountdowns, 30000);
+
+{% if competitor.is_crawling %}
+setTimeout(() => location.reload(), 5000);
+{% endif %}
+
+document.querySelectorAll(".action-btn").forEach((button) => {
+    button.addEventListener("click", async () => {
+        if (button.dataset.confirm && !confirm(button.dataset.confirm)) {
+            return;
+        }
+        const originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = "…";
+        try {
+            const response = await fetch(button.dataset.action, {method: button.dataset.method || "POST"});
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || `Ошибка ${response.status}`);
+            }
+            if (button.dataset.redirect) {
+                location.href = button.dataset.redirect;
+            } else {
+                location.reload();
+            }
+        } catch (err) {
+            button.disabled = false;
+            button.textContent = originalText;
+            alert(err.message);
+        }
+    });
+});
+</script>
+{% endif %}
+{% endblock %}

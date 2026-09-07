@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Настройки — AI-Скаут{% endblock %}
+{% block content %}
+<h1>Настройки</h1>
+
+<div class="card">
+    <h2>Расписание обхода</h2>
+    <p class="muted">Общий интервал для всех конкурентов. Каждый конкурент обходится независимо от остальных.</p>
+    <form id="schedule-form" style="display:flex; align-items:end; gap:12px; flex-wrap:wrap;">
+        <label class="field">
+            Дней
+            <input type="number" id="schedule-days" min="0" value="{{ schedule.interval_days }}" style="width:80px;">
+        </label>
+        <label class="field">
+            Часов
+            <input type="number" id="schedule-hours" min="0" max="23" value="{{ schedule.interval_hours }}" style="width:80px;">
+        </label>
+        <button type="submit">Сохранить расписание</button>
+        <span id="schedule-status" class="muted"></span>
+    </form>
+</div>
+
+<script>
+document.getElementById("schedule-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = document.getElementById("schedule-status");
+    const interval_days = parseInt(document.getElementById("schedule-days").value || "0", 10);
+    const interval_hours = parseInt(document.getElementById("schedule-hours").value || "0", 10);
+    status.textContent = "Сохраняю…";
+    try {
+        const response = await fetch("/api/schedule", {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({interval_days, interval_hours}),
+        });
+        if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(detail.detail || `Ошибка ${response.status}`);
+        }
+        status.textContent = "Сохранено";
+    } catch (err) {
+        status.textContent = err.message;
+    }
+});
+</script>
+{% endblock %}

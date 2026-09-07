@@ -1,82 +1,79 @@
 {% extends "base.html" %}
 {% block title %}Конкуренты — AI-Скаут{% endblock %}
 {% block content %}
-<h1>Конкуренты</h1>
-
-<div class="card">
-    <strong>Расписание обхода</strong>
-    <p class="muted">Общий интервал для всех конкурентов. Каждый конкурент обходится независимо от остальных.</p>
-    <form id="schedule-form" style="display:flex; align-items:end; gap:12px; flex-wrap:wrap;">
-        <label style="display:flex; flex-direction:column; font-size:12px; color:#6b7280;">
-            Дней
-            <input type="number" id="schedule-days" min="0" value="{{ schedule.interval_days }}" style="width:80px; padding:6px; border-radius:6px; border:1px solid #ddd;">
-        </label>
-        <label style="display:flex; flex-direction:column; font-size:12px; color:#6b7280;">
-            Часов
-            <input type="number" id="schedule-hours" min="0" max="23" value="{{ schedule.interval_hours }}" style="width:80px; padding:6px; border-radius:6px; border:1px solid #ddd;">
-        </label>
-        <button type="submit">Сохранить расписание</button>
-        <span id="schedule-status" class="muted"></span>
-    </form>
-</div>
-
-<div class="card">
-    <strong>Добавить конкурента</strong>
-    <form id="add-competitor-form" style="display:flex; align-items:end; gap:12px; flex-wrap:wrap; margin-top:8px;">
-        <label style="display:flex; flex-direction:column; font-size:12px; color:#6b7280; flex:1; min-width:180px;">
-            Название
-            <input type="text" id="new-name" required style="padding:6px; border-radius:6px; border:1px solid #ddd;">
-        </label>
-        <label style="display:flex; flex-direction:column; font-size:12px; color:#6b7280; flex:2; min-width:240px;">
-            URL сайта
-            <input type="url" id="new-url" required placeholder="https://example.com" style="padding:6px; border-radius:6px; border:1px solid #ddd;">
-        </label>
-        <button type="submit">Добавить</button>
-        <span id="add-status" class="muted"></span>
-    </form>
+<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+    <h1 style="margin:0;">Конкуренты</h1>
+    <button type="button" id="open-add-dialog">+ Добавить конкурента</button>
 </div>
 
 {% if not competitors %}
-<p class="muted">Пока нет ни одного конкурента — добавьте первого выше.</p>
+<p class="muted">Пока нет ни одного конкурента — добавьте первого кнопкой выше.</p>
+{% else %}
+<div class="card" style="padding:0;">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Конкурент</th>
+                <th>Статус</th>
+                <th>Последний обход</th>
+                <th>Следующий обход</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in competitors %}
+            <tr class="clickable-row" data-href="/competitors/{{ c.id }}">
+                <td>
+                    <strong>{{ c.name }}</strong>
+                    <div class="muted">{{ c.base_url }}</div>
+                </td>
+                <td>
+                    <span class="badge badge-{{ c.status.value }}">
+                        {% if c.status.value == "active" %}активна
+                        {% elif c.status.value == "needs_session" %}нужна сессия
+                        {% else %}на паузе{% endif %}
+                    </span>
+                    {% if c.is_paused %}<br><span class="badge badge-paused" style="margin-top:4px;">пауза</span>{% endif %}
+                    {% if c.is_crawling %}<br><span class="badge" style="background:#fff8e1;color:#b28704; margin-top:4px;">⏳ идёт обход</span>{% endif %}
+                </td>
+                <td class="muted">{{ c.last_crawl_finished_at.strftime("%d.%m.%Y %H:%M") if c.last_crawl_finished_at else "ещё не было" }}</td>
+                <td class="muted">
+                    <span class="next-crawl" data-next-crawl-at="{{ c.next_crawl_at.isoformat() if c.next_crawl_at and not c.is_paused else '' }}">
+                        {% if c.is_paused %}на паузе{% endif %}
+                    </span>
+                </td>
+                <td onclick="event.stopPropagation();">
+                    {% if c.is_crawling %}
+                    <button type="button" disabled>Обход идёт…</button>
+                    {% else %}
+                    <button type="button" class="action-btn secondary-btn" data-action="/api/competitors/{{ c.id }}/crawl">Обойти сейчас</button>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
 {% endif %}
 
-{% for c in competitors %}
-<div class="card">
-    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
-        <div>
-            <strong>{{ c.name }}</strong>
-            <span class="badge badge-{{ c.status.value }}">
-                {% if c.status.value == "active" %}активна
-                {% elif c.status.value == "needs_session" %}нужна ручная сессия
-                {% else %}на паузе{% endif %}
-            </span>
-            {% if c.is_paused %}<span class="badge badge-paused">пауза</span>{% endif %}
-            {% if c.is_crawling %}<span class="badge" style="background:#fff8e1;color:#b28704;">⏳ обход выполняется…</span>{% endif %}
+<dialog id="add-dialog">
+    <form id="add-competitor-form" class="dialog-body">
+        <h2 style="margin:0;">Добавить конкурента</h2>
+        <label class="field">
+            Название
+            <input type="text" id="new-name" required>
+        </label>
+        <label class="field">
+            URL сайта
+            <input type="url" id="new-url" required placeholder="https://example.com">
+        </label>
+        <span id="add-status" class="muted"></span>
+        <div class="dialog-actions">
+            <button type="button" class="secondary-btn" id="cancel-add-dialog">Отмена</button>
+            <button type="submit">Добавить</button>
         </div>
-        <div style="display:flex; gap:8px;">
-            {% if c.google_drive_folder_url %}
-            <a class="btn" style="text-decoration:none;" href="{{ c.google_drive_folder_url }}" target="_blank" rel="noopener">Отчёты</a>
-            {% endif %}
-            <button type="button" class="action-btn" data-action="/api/competitors/{{ c.id }}/{{ 'resume' if c.is_paused else 'pause' }}">{{ 'Снять с паузы' if c.is_paused else 'Пауза' }}</button>
-            {% if c.is_crawling %}
-            <button type="button" disabled>Обход идёт…</button>
-            {% else %}
-            <button type="button" class="action-btn" data-action="/api/competitors/{{ c.id }}/crawl">Обойти сейчас</button>
-            {% endif %}
-            <button type="button" class="action-btn danger-btn" data-action="/api/competitors/{{ c.id }}"
-                    data-method="DELETE" data-confirm="Удалить конкурента «{{ c.name }}» и всю историю по нему?">Удалить</button>
-        </div>
-    </div>
-    <div class="muted">{{ c.base_url }}</div>
-    <div class="muted" style="margin-top:6px; display:flex; gap:16px; flex-wrap:wrap;">
-        <span>Последний обход: {{ c.last_crawl_finished_at.strftime("%d.%m.%Y %H:%M") if c.last_crawl_finished_at else "ещё не было" }}</span>
-        <span class="next-crawl" data-next-crawl-at="{{ c.next_crawl_at.isoformat() if c.next_crawl_at and not c.is_paused else '' }}">
-            {% if c.is_paused %}Следующий обход: на паузе{% endif %}
-        </span>
-    </div>
-</div>
-{% endfor %}
-{% set any_crawling = competitors|selectattr("is_crawling")|list %}
+    </form>
+</dialog>
 
 <script>
 async function postJson(url, body) {
@@ -92,6 +89,10 @@ async function postJson(url, body) {
     return response.json();
 }
 
+const addDialog = document.getElementById("add-dialog");
+document.getElementById("open-add-dialog").addEventListener("click", () => addDialog.showModal());
+document.getElementById("cancel-add-dialog").addEventListener("click", () => addDialog.close());
+
 document.getElementById("add-competitor-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const status = document.getElementById("add-status");
@@ -100,28 +101,6 @@ document.getElementById("add-competitor-form").addEventListener("submit", async 
     status.textContent = "Добавляю…";
     try {
         await postJson("/api/competitors", {name, base_url});
-        location.reload();
-    } catch (err) {
-        status.textContent = err.message;
-    }
-});
-
-document.getElementById("schedule-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const status = document.getElementById("schedule-status");
-    const interval_days = parseInt(document.getElementById("schedule-days").value || "0", 10);
-    const interval_hours = parseInt(document.getElementById("schedule-hours").value || "0", 10);
-    status.textContent = "Сохраняю…";
-    try {
-        const response = await fetch("/api/schedule", {
-            method: "PUT",
-            headers: {"Content-Type": "application/json"},
-            body: JSON.stringify({interval_days, interval_hours}),
-        });
-        if (!response.ok) {
-            const detail = await response.json().catch(() => ({}));
-            throw new Error(detail.detail || `Ошибка ${response.status}`);
-        }
         location.reload();
     } catch (err) {
         status.textContent = err.message;
@@ -138,7 +117,7 @@ function formatCountdown(ms) {
     if (days) parts.push(`${days} д`);
     if (hours) parts.push(`${hours} ч`);
     if (!days && minutes) parts.push(`${minutes} мин`);
-    return `Следующий обход через: ${parts.join(" ") || "меньше минуты"}`;
+    return `через ${parts.join(" ") || "меньше минуты"}`;
 }
 
 function updateCountdowns() {
@@ -149,21 +128,16 @@ function updateCountdowns() {
         el.textContent = formatCountdown(diff);
     });
 }
-
 updateCountdowns();
 setInterval(updateCountdowns, 30000);
 
+{% set any_crawling = competitors|selectattr("is_crawling")|list %}
 {% if any_crawling %}
-// Хотя бы один обход сейчас выполняется — обновляем страницу, чтобы статус
-// "обход выполняется" сам сменился на актуальный без ручного F5.
 setTimeout(() => location.reload(), 5000);
 {% endif %}
 
 document.querySelectorAll(".action-btn").forEach((button) => {
     button.addEventListener("click", async () => {
-        if (button.dataset.confirm && !confirm(button.dataset.confirm)) {
-            return;
-        }
         const originalText = button.textContent;
         button.disabled = true;
         button.textContent = "…";
@@ -180,6 +154,10 @@ document.querySelectorAll(".action-btn").forEach((button) => {
             alert(err.message);
         }
     });
+});
+
+document.querySelectorAll("tr.clickable-row").forEach((row) => {
+    row.addEventListener("click", () => { window.location.href = row.dataset.href; });
 });
 </script>
 {% endblock %}

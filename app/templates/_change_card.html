@@ -1,0 +1,17 @@
+{% macro change_card(change, show_competitor=False) %}
+<a class="link" href="/changes/{{ change.id }}">
+<div class="card change-card">
+    <span class="badge badge-{{ change.change_type.value }}">
+        {% if change.change_type.value == "new" %}новая страница
+        {% elif change.change_type.value == "changed" %}изменение
+        {% else %}удалена{% endif %}
+    </span>
+    {% if show_competitor %}<span class="muted"> — {{ change.page.competitor.name }}</span>{% endif %}
+    <div class="muted">{{ change.page.url }}</div>
+    <div class="muted">{{ change.detected_at.strftime("%d.%m.%Y %H:%M") }}</div>
+    {% if change.ai_analysis and change.ai_analysis.summary %}
+    <p>{{ change.ai_analysis.summary }}</p>
+    {% endif %}
+</div>
+</a>
+{% endmacro %}

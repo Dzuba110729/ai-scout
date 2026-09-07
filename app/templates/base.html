@@ -5,27 +5,74 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}AI-Скаут{% endblock %}</title>
     <style>
-        :root { color-scheme: light; }
+        :root {
+            color-scheme: light;
+            --bg: #f5f6f8;
+            --sidebar-bg: #17181c;
+            --sidebar-fg: #b8bcc6;
+            --sidebar-fg-active: #fff;
+            --sidebar-accent: #2f7bff;
+            --text: #1c1e21;
+            --muted: #6b7280;
+            --border: #e5e7eb;
+            --card-bg: #fff;
+        }
+        * { box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             margin: 0;
-            background: #f5f6f8;
-            color: #1c1e21;
+            background: var(--bg);
+            color: var(--text);
+            display: flex;
+            min-height: 100vh;
         }
-        header {
-            background: #17181c;
+
+        /* --- Сайдбар --- */
+        .sidebar {
+            width: 220px;
+            flex: 0 0 220px;
+            background: var(--sidebar-bg);
+            color: var(--sidebar-fg);
+            display: flex;
+            flex-direction: column;
+            padding: 20px 0;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+        }
+        .sidebar .brand {
             color: #fff;
-            padding: 14px 24px;
+            font-weight: 700;
+            font-size: 16px;
+            padding: 0 20px 20px;
+        }
+        .sidebar nav { display: flex; flex-direction: column; gap: 2px; }
+        .sidebar nav a {
+            color: var(--sidebar-fg);
+            text-decoration: none;
+            font-size: 14px;
+            padding: 10px 20px;
+            border-left: 3px solid transparent;
             display: flex;
             align-items: center;
-            gap: 24px;
+            gap: 10px;
         }
-        header a { color: #d6d9df; text-decoration: none; font-size: 14px; }
-        header a.active, header a:hover { color: #fff; }
-        header .brand { font-weight: 700; margin-right: auto; color: #fff; }
-        main { max-width: 960px; margin: 0 auto; padding: 24px; }
+        .sidebar nav a .icon { font-size: 15px; width: 18px; text-align: center; }
+        .sidebar nav a:hover { color: #fff; background: rgba(255,255,255,0.05); }
+        .sidebar nav a.active {
+            color: var(--sidebar-fg-active);
+            background: rgba(47,123,255,0.15);
+            border-left-color: var(--sidebar-accent);
+        }
+
+        /* --- Контент --- */
+        .content { flex: 1; min-width: 0; padding: 28px 32px; max-width: 1100px; }
+        h1 { font-size: 20px; margin: 0 0 20px; }
+        h2 { font-size: 16px; margin: 0 0 12px; }
+        h3 { font-size: 14px; margin: 0 0 8px; }
+
         .card {
-            background: #fff;
+            background: var(--card-bg);
             border-radius: 10px;
             padding: 16px 20px;
             margin-bottom: 12px;
@@ -44,35 +91,84 @@
         .badge-new { background: #e3f2fd; color: #1565c0; }
         .badge-changed { background: #fff8e1; color: #b28704; }
         .badge-removed { background: #fdecea; color: #c62828; }
-        .muted { color: #6b7280; font-size: 13px; }
+        .muted { color: var(--muted); font-size: 13px; }
         a.link { color: #1565c0; text-decoration: none; }
         a.link:hover { text-decoration: underline; }
         pre.diff { background: #17181c; color: #eee; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
         pre.diff .add { color: #7ee787; }
         pre.diff .del { color: #ff7b72; }
-        .page-content { max-height: 520px; overflow-y: auto; border: 1px solid #eee; border-radius: 8px; padding: 12px 16px; }
+        .page-content { max-height: 520px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
         .page-content p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
         .page-content p:last-child { margin-bottom: 0; }
-        .competitor-group { background: #fff; border-radius: 10px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); overflow: hidden; }
+        .competitor-group { background: var(--card-bg); border-radius: 10px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); overflow: hidden; }
         .competitor-group summary { padding: 14px 20px; cursor: pointer; list-style: none; }
         .competitor-group summary::-webkit-details-marker { display: none; }
         .competitor-group-body { padding: 0 20px 16px; }
-        .change-card { margin-bottom: 8px; box-shadow: none; border: 1px solid #eee; }
+        .change-card { margin-bottom: 8px; box-shadow: none; border: 1px solid var(--border); }
         .change-card:last-child { margin-bottom: 0; }
         .danger-btn { background: #fdecea; color: #c62828; }
         button, .btn {
-            background: #17181c; color: #fff; border: none; border-radius: 6px;
+            background: var(--sidebar-bg); color: #fff; border: none; border-radius: 6px;
             padding: 6px 12px; font-size: 13px; cursor: pointer;
         }
+        button:disabled { opacity: 0.6; cursor: default; }
+        button.secondary-btn, .btn.secondary-btn { background: #fff; color: var(--text); border: 1px solid var(--border); }
+        input, select {
+            padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 13px;
+        }
+        label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
+        /* --- Таблица (список конкурентов) --- */
+        table.data-table { width: 100%; border-collapse: collapse; }
+        table.data-table th {
+            text-align: left; font-size: 12px; color: var(--muted); font-weight: 600;
+            padding: 8px 12px; border-bottom: 1px solid var(--border);
+        }
+        table.data-table td { padding: 12px; border-bottom: 1px solid var(--border); font-size: 14px; vertical-align: middle; }
+        table.data-table tr:last-child td { border-bottom: none; }
+        table.data-table tr.clickable-row { cursor: pointer; }
+        table.data-table tr.clickable-row:hover { background: #fafbfc; }
+
+        /* --- Карточки-счётчики дашборда --- */
+        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
+        .stat-tile { background: var(--card-bg); border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+        .stat-tile .value { font-size: 26px; font-weight: 700; }
+        .stat-tile .label { font-size: 13px; color: var(--muted); margin-top: 2px; }
+        .stat-tile.attention .value { color: #c62828; }
+
+        /* --- Вкладки на карточке конкурента --- */
+        .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+        .tabs button.tab-btn {
+            background: none; color: var(--muted); border: none; border-bottom: 2px solid transparent;
+            border-radius: 0; padding: 10px 4px; margin-right: 20px; font-size: 14px; cursor: pointer;
+        }
+        .tabs button.tab-btn.active { color: var(--text); border-bottom-color: var(--sidebar-accent); font-weight: 600; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        /* --- Диалог добавления конкурента --- */
+        dialog { border: none; border-radius: 10px; padding: 0; max-width: 420px; width: 90%; }
+        dialog::backdrop { background: rgba(0,0,0,0.4); }
+        dialog .dialog-body { padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+        dialog .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+        /* --- Панель фильтров ленты изменений --- */
+        .filter-bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
+
+        .breadcrumb { margin-bottom: 12px; }
     </style>
 </head>
 <body>
-    <header>
-        <span class="brand">AI-Скаут</span>
-        <a href="/">Конкуренты</a>
-        <a href="/changes">Лента изменений</a>
-    </header>
-    <main>
+    <aside class="sidebar">
+        <div class="brand">AI-Скаут</div>
+        <nav>
+            <a href="/" class="{{ 'active' if active_nav == 'dashboard' else '' }}"><span class="icon">&#9673;</span> Дашборд</a>
+            <a href="/competitors" class="{{ 'active' if active_nav == 'competitors' else '' }}"><span class="icon">&#9737;</span> Конкуренты</a>
+            <a href="/changes" class="{{ 'active' if active_nav == 'changes' else '' }}"><span class="icon">&#9776;</span> Лента изменений</a>
+            <a href="/settings" class="{{ 'active' if active_nav == 'settings' else '' }}"><span class="icon">&#9881;</span> Настройки</a>
+        </nav>
+    </aside>
+    <main class="content">
         {% block content %}{% endblock %}
     </main>
 </body>
