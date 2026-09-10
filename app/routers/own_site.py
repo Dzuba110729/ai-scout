@@ -58,7 +58,7 @@ def save_own_site(payload: OwnSiteUpdate, db: Session = Depends(get_db)):
 
 
 @router.post("/crawl", status_code=202)
-def trigger_own_site_crawl(db: Session = Depends(get_db)):
+async def trigger_own_site_crawl(db: Session = Depends(get_db)):
     own = _get_or_404(db)
 
     # Идём через crawl_manager, как и обход конкурентов: там защита от повторного
