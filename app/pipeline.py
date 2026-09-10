@@ -1,25 +1,39 @@
 """Полный цикл обхода одного конкурента: краулер -> diff -> сохранение -> ИИ -> Telegram.
 
-Используется и планировщиком (раз в неделю), и ручным триггером из UI/API.
+Запускается только через app/crawl_manager.py — он же отвечает за отметку
+«обход идёт» и за лимит одновременных обходов.
+
+Всё, что ходит в сеть синхронно (Google Docs/Drive), выносится в отдельный поток
+через asyncio.to_thread: иначе на время создания отчёта встаёт весь event loop —
+другие обходы не двигаются, а веб-интерфейс не отвечает.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 
 from playwright.async_api import async_playwright
 from sqlalchemy.orm import Session
 
-from app.ai.analyze import AiAnalysisResult, ClaudeCliError, analyze_page_change
+from app.ai.analyze import (
+    AiAnalysisResult,
+    ClaudeCliError,
+    analyze_page_change,
+    parse_ai_response,
+    run_claude_cli,
+)
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import launch_browser, new_stealth_context, storage_state_path_for
 from app.crawler.crawl import CompetitorBlockedError, CrawlResult, crawl_competitor
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
+from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
 from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError, build_row
 from app.models import (
     AiAnalysis,
     ChangeType as DbChangeType,
     Competitor,
+    DisappearanceReason,
     NotificationLog,
     NotificationStatus,
     Page,
@@ -42,6 +56,31 @@ _CHANGE_TYPE_TO_DB = {
     ChangeType.CHANGED: DbChangeType.CHANGED,
     ChangeType.REMOVED: DbChangeType.REMOVED,
 }
+
+_DISAPPEARANCE_TO_DB = {
+    DisappearReason.DELETED: DisappearanceReason.DELETED,
+    DisappearReason.MOVED: DisappearanceReason.MOVED,
+    DisappearReason.STILL_ALIVE: DisappearanceReason.MISSING_FROM_CRAWL,
+    DisappearReason.UNKNOWN: DisappearanceReason.MISSING_FROM_CRAWL,
+}
+
+_REDIRECT_PROMPT = (
+    "Ты аналитик, который следит за сайтом конкурента для отдела маркетинга.\n"
+    "Страница {old_url} больше не открывается по прежнему адресу — сайт "
+    "перенаправляет на {new_url}.\n"
+    "Ниже текст страницы, на которую ведёт перенаправление.\n\n"
+    "Текст:\n"
+    "```\n"
+    "{text}\n"
+    "```\n\n"
+    "Верни СТРОГО один JSON-объект (без пояснений вне JSON):\n"
+    "{{\n"
+    '  "category": "тип страницы: лендинг/оффер/цены/статья/другое",\n'
+    '  "usp": "ключевое УТП или выгода, если есть, иначе null",\n'
+    '  "cta": "текст призыва к действию, если есть, иначе null",\n'
+    '  "summary": "1-2 предложения простым русским: что теперь на этой странице"\n'
+    "}}\n"
+)
 
 
 def _latest_snapshots_by_url(db: Session, competitor_id: int) -> dict[str, tuple[Page, str]]:
@@ -113,13 +152,9 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         logger.info("Конкурент %s на паузе — пропускаем обход", competitor.name)
         return
 
-    # Проверку "уже идёт обход" делает вызывающий код (router/scheduler) синхронно, до
-    # постановки фоновой задачи — здесь её повторять нельзя: раз мы уже внутри функции,
-    # значит вызывающий код только что сам выставил started_at, и is_crawling будет True.
-    competitor.last_crawl_started_at = datetime.now(UTC)
-    competitor.last_crawl_finished_at = None
-    db.add(competitor)
-    db.commit()
+    # Отметку «обход идёт» уже поставил crawl_manager — синхронно, до постановки
+    # фоновой задачи. Повторять здесь проверку is_crawling нельзя: раз мы внутри
+    # функции, значит отметка только что выставлена и проверка всегда сработает.
     await _notify(notifier, db, competitor, format_started_message(competitor.name), page_change_id=None)
     db.commit()
 
@@ -129,43 +164,63 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
     try:
         crawl_result = await _crawl_competitor(competitor)
 
-        previous_by_url = _latest_snapshots_by_url(db, competitor.id)
+        # Тяжёлая выборка: тянет тексты всех страниц конкурента (мегабайты) —
+        # синхронный SQLAlchemy на такой запросе держит event loop заметно долго.
+        previous_by_url = await asyncio.to_thread(_latest_snapshots_by_url, db, competitor.id)
         previous_texts = {url: text for url, (_page, text) in previous_by_url.items()}
 
         diffs = diff_crawl(previous_texts, crawl_result.pages)
         run_at = datetime.now(UTC)
 
-        report_rows: list[list[str]] = []
-        for page_diff in diffs:
-            page = await _apply_page_diff(db, competitor, page_diff, previous_by_url)
-            page_change = _record_change(db, page, page_diff)
-            db.flush()  # получаем page_change.id до вызова ИИ
-
-            analysis = await _analyze_and_store(db, page_change, page_diff)
-            report_rows.append(build_row(page_diff, analysis, run_at))
+        checks = await _recheck_missing_pages(diffs, previous_by_url)
+        diffs = [d for d in diffs if _is_real_change(d, checks)]
 
         now = datetime.now(UTC)
         for url in crawl_result.pages:
             if url in previous_by_url:
-                previous_by_url[url][0].last_seen_at = now
-        for url, (page, _text) in previous_by_url.items():
-            if url not in crawl_result.pages:
-                page.is_removed = True
-                page.removed_at = now
+                _mark_page_alive(previous_by_url[url][0], now)
+        for url, check in checks.items():
+            _apply_missing_check(previous_by_url[url][0], check, now)
+
+        report_rows: list[list[str]] = []
+        for page_diff in diffs:
+            page = _apply_page_diff(db, competitor, page_diff, previous_by_url)
+            check = checks.get(page_diff.url)
+            moved = check.final_url if check and check.reason is DisappearReason.MOVED else None
+            if moved:
+                page.redirect_target_summary = await _describe_redirect_target(check)
+
+            page_change = _record_change(db, page, page_diff)
+            db.flush()  # получаем page_change.id до вызова ИИ
+
+            analysis = await _analyze_and_store(db, page_change, page_diff)
+            report_rows.append(
+                build_row(
+                    page_diff,
+                    analysis,
+                    run_at,
+                    redirect_to=moved,
+                    redirect_summary=page.redirect_target_summary if moved else None,
+                )
+            )
 
         if competitor.status != SessionStatus.ACTIVE:
             competitor.status = SessionStatus.ACTIVE
             db.add(competitor)
 
+        notes = build_run_notes(crawl_result, checks)
+
         report_url = None
         if report_rows:
-            report_url = _write_run_report(competitor, run_at, report_rows)
+            report_url = await _write_run_report(db, competitor, run_at, report_rows, notes)
 
         competitor.last_crawl_finished_at = now
         db.add(competitor)
-        db.commit()
+        await asyncio.to_thread(db.commit)
 
         finished_message = format_finished_message(competitor.name, len(diffs), report_url)
+        if notes:
+            finished_message = "\n\n".join([finished_message, "\n".join(notes)])
         await _notify(notifier, db, competitor, finished_message, page_change_id=None)
         db.commit()
 
@@ -193,25 +248,154 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         logger.exception("Непредвиденная ошибка при обходе конкурента %s", competitor.name)
 
 
-def _write_run_report(competitor: Competitor, run_at: datetime, rows: list[list[str]]) -> str | None:
-    """Создаёт документ прогона в папке конкурента на Google Drive. None при любом сбое."""
-    client = GoogleDocsClient()
-    if not client.is_configured:
+async def _recheck_missing_pages(
+    diffs: list[PageDiff], previous_by_url: dict[str, tuple[Page, str]]
+) -> dict[str, MissingPageCheck]:
+    """Ходит по адресам страниц, пропавших из обхода, и выясняет их судьбу.
+
+    Раньше такая страница слепо помечалась удалённой. При лимите в 200 страниц у
+    сайта на 500 это давало 300 ложных «удалений» каждый прогон.
+    """
+    missing_pages = [
+        previous_by_url[d.url][0]
+        for d in diffs
+        if d.change_type is ChangeType.REMOVED and d.url in previous_by_url
+    ]
+    if not missing_pages:
+        return {}
+
+    # За прогон проверяем ограниченное число страниц, поэтому начинаем с тех, кого
+    # давно не проверяли — иначе один и тот же хвост списка никогда не дойдёт до проверки.
+    missing_pages.sort(key=lambda page: (page.last_checked_at is not None, page.last_checked_at))
+    return await check_missing_pages([page.url for page in missing_pages])
+
+
+def _is_real_change(page_diff: PageDiff, checks: dict[str, MissingPageCheck]) -> bool:
+    """Пропажу из обхода показываем владельцу, только если страница правда удалена
+    или переехала. Живая страница, не попавшая в обход, — это не новость."""
+    if page_diff.change_type is not ChangeType.REMOVED:
+        return True
+    check = checks.get(page_diff.url)
+    return check is not None and check.is_really_gone
+
+
+def _mark_page_alive(page: Page, now: datetime) -> None:
+    page.last_seen_at = now
+    page.last_checked_at = now
+    # Страница вернулась в обход — снимаем прежний вердикт, иначе в интерфейсе
+    # навсегда останется отметка "удалена/переехала" по живой странице.
+    page.is_removed = False
+    page.removed_at = None
+    page.disappearance_reason = None
+    page.redirect_to_url = None
+    page.redirect_target_summary = None
+
+
+def _apply_missing_check(page: Page, check: MissingPageCheck, now: datetime) -> None:
+    page.last_checked_at = now
+    page.disappearance_reason = _DISAPPEARANCE_TO_DB[check.reason]
+
+    if not check.is_really_gone:
+        return  # страница жива (или вердикта нет) — удалённой не помечаем
+
+    page.is_removed = True
+    page.removed_at = now
+    if check.reason is DisappearReason.MOVED:
+        page.redirect_to_url = check.final_url
+
+
+def build_run_notes(crawl_result: CrawlResult, checks: dict[str, MissingPageCheck]) -> list[str]:
+    """Пояснения к прогону простым языком — уходят в отчёт и в Telegram."""
+    notes: list[str] = []
+
+    if crawl_result.is_truncated:
+        notes.append(
+            f"Показан не весь сайт: у конкурента найдено страниц — {crawl_result.urls_total}, "
+            f"а за один обход мы смотрим только {len(crawl_result.pages)}. "
+            "Чтобы видеть больше, увеличьте лимит страниц в настройках."
+        )
+
+    moved = sum(1 for c in checks.values() if c.reason is DisappearReason.MOVED)
+    if moved:
+        notes.append(f"Страниц переехало на новый адрес: {moved}.")
+
+    survived = sum(1 for c in checks.values() if not c.is_really_gone)
+    if survived:
+        notes.append(
+            f"Страниц не попало в этот обход, но они по-прежнему открываются: {survived}. "
+            "Удалёнными мы их не считаем."
+        )
+
+    return notes
+
+
+def build_redirect_prompt(old_url: str, new_url: str, target_text: str) -> str:
+    return _REDIRECT_PROMPT.format(old_url=old_url, new_url=new_url, text=target_text[:4000])
+
+
+async def _describe_redirect_target(check: MissingPageCheck) -> str | None:
+    """Коротко спрашивает у ИИ, что теперь на странице, куда ведёт перенаправление."""
+    if not check.final_url or not check.final_text:
         return None
 
     try:
-        if not competitor.google_drive_folder_id:
-            folder_id, folder_url = client.get_or_create_competitor_folder(competitor.name)
-            competitor.google_drive_folder_id = folder_id
-            competitor.google_drive_folder_url = folder_url
-
-        return client.create_run_document(competitor.google_drive_folder_id, run_at, rows)
-    except GoogleDocsError:
-        logger.exception("Не удалось сохранить отчёт обхода конкурента %s в Google Docs", competitor.name)
+        raw_text = await run_claude_cli(
+            build_redirect_prompt(check.url, check.final_url, check.final_text)
+        )
+        return parse_ai_response(raw_text).summary
+    except (ClaudeCliError, ValueError) as exc:
+        logger.warning("Не удалось выяснить, что теперь на странице %s: %s", check.final_url, exc)
         return None
 
 
-async def _apply_page_diff(
+def _create_run_report(
+    competitor_name: str,
+    folder_id: str | None,
+    run_at: datetime,
+    rows: list[list[str]],
+    notes: list[str],
+) -> tuple[str | None, str | None, str | None]:
+    """Создаёт документ прогона на Google Drive. Возвращает (url отчёта, id папки, url папки).
+
+    Блокирующая: google-api-python-client ходит в сеть синхронно. Вызывать только
+    через asyncio.to_thread — иначе на всё время создания отчёта встаёт event loop.
+    """
+    client = GoogleDocsClient()
+    if not client.is_configured:
+        return None, folder_id, None
+
+    try:
+        folder_url = None
+        if not folder_id:
+            folder_id, folder_url = client.get_or_create_competitor_folder(competitor_name)
+        return client.create_run_document(folder_id, run_at, rows, notes=notes), folder_id, folder_url
+    except GoogleDocsError:
+        logger.exception("Не удалось сохранить отчёт обхода конкурента %s в Google Docs", competitor_name)
+        return None, folder_id, None
+
+
+async def _write_run_report(
+    db: Session,
+    competitor: Competitor,
+    run_at: datetime,
+    rows: list[list[str]],
+    notes: list[str],
+) -> str | None:
+    report_url, folder_id, folder_url = await asyncio.to_thread(
+        _create_run_report, competitor.name, competitor.google_drive_folder_id, run_at, rows, notes
+    )
+
+    # ORM-объект правим на основном потоке, а не внутри to_thread: Session не
+    # рассчитан на работу из двух потоков одновременно.
+    if folder_id and folder_id != competitor.google_drive_folder_id:
+        competitor.google_drive_folder_id = folder_id
+        competitor.google_drive_folder_url = folder_url
+        db.add(competitor)
+
+    return report_url
+
+
+def _apply_page_diff(
     db: Session,
     competitor: Competitor,
     page_diff: PageDiff,
@@ -220,9 +404,21 @@ async def _apply_page_diff(
     if page_diff.url in previous_by_url:
         return previous_by_url[page_diff.url][0]
 
-    page = Page(competitor_id=competitor.id, url=page_diff.url)
-    db.add(page)
+    # Страница может уже быть в БД, но помеченной удалённой (например, ложно —
+    # старой логикой). Создать вторую запись с тем же url нельзя: на паре
+    # (конкурент, url) стоит уникальный индекс, и обход упал бы на вставке.
+    page = (
+        db.query(Page)
+        .filter(Page.competitor_id == competitor.id, Page.url == page_diff.url)
+        .one_or_none()
+    )
+    if page is not None:
+        _mark_page_alive(page, datetime.now(UTC))
+    else:
+        page = Page(competitor_id=competitor.id, url=page_diff.url)
+        db.add(page)
     db.flush()
+
     previous_by_url[page_diff.url] = (page, "")
     return page
 

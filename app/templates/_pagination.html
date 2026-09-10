@@ -1,0 +1,26 @@
+{% macro pagination(pagination, url_base, anchor="") %}
+{% if pagination.total %}
+<nav class="pager">
+    <div class="pager-info">
+        Показаны изменения {{ pagination.first_index }}–{{ pagination.last_index }} из {{ pagination.total }}
+        {% if pagination.total_pages > 1 %}
+        <span class="pager-sub">Страница {{ pagination.page }} из {{ pagination.total_pages }}</span>
+        {% endif %}
+    </div>
+    {% if pagination.total_pages > 1 %}
+    <div class="pager-buttons">
+        {% if pagination.has_prev %}
+        <a class="btn secondary-btn" href="{{ url_base }}page={{ pagination.page - 1 }}{{ anchor }}">← Назад</a>
+        {% else %}
+        <span class="btn secondary-btn pager-disabled">← Назад</span>
+        {% endif %}
+        {% if pagination.has_next %}
+        <a class="btn secondary-btn" href="{{ url_base }}page={{ pagination.page + 1 }}{{ anchor }}">Вперёд →</a>
+        {% else %}
+        <span class="btn secondary-btn pager-disabled">Вперёд →</span>
+        {% endif %}
+    </div>
+    {% endif %}
+</nav>
+{% endif %}
+{% endmacro %}

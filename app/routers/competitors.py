@@ -1,16 +1,15 @@
 import logging
-from datetime import UTC, datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app import crawl_manager
 from app.auth import require_basic_auth
-from app.db import SessionLocal, get_db
+from app.db import get_db
 from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError
 from app.models import Competitor, SessionStatus
-from app.pipeline import run_crawl_for_competitor
 from app.scheduler import get_schedule_config, schedule_competitor_and_save_next_run, unschedule_competitor
-from app.schemas import CompetitorCreate, CompetitorOut
+from app.schemas import CompetitorCreate, CompetitorOut, CrawlAllOut
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +49,22 @@ def create_competitor(payload: CompetitorCreate, db: Session = Depends(get_db)):
     return competitor
 
 
+@router.post("/crawl-all", status_code=202, response_model=CrawlAllOut)
+async def trigger_crawl_all(db: Session = Depends(get_db)):
+    """Запускает обход всех конкурентов, кроме поставленных на паузу.
+
+    Объявлен выше маршрутов с {competitor_id}, чтобы "crawl-all" не был принят
+    за идентификатор конкурента.
+    """
+    result = crawl_manager.start_all(db)
+    return {
+        "status": "запущен обход всех конкурентов",
+        "started": result.started,
+        "skipped": result.skipped_running,
+        "paused": result.skipped_paused,
+    }
+
+
 @router.post("/{competitor_id}/pause", response_model=CompetitorOut)
 def pause_competitor(competitor_id: int, db: Session = Depends(get_db)):
     competitor = _get_or_404(db, competitor_id)
@@ -81,31 +96,15 @@ def delete_competitor(competitor_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{competitor_id}/crawl", status_code=202)
-def trigger_crawl(competitor_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def trigger_crawl(competitor_id: int, db: Session = Depends(get_db)):
     competitor = _get_or_404(db, competitor_id)
 
-    if competitor.is_crawling:
+    # Отметку "обход начат" и постановку фоновой задачи делает crawl_manager —
+    # одним синхронным куском, до ответа. Иначе быстрый повторный клик успевает
+    # проскочить проверку, пока фоновая задача ещё не стартовала.
+    if not crawl_manager.start(db, competitor):
         raise HTTPException(status_code=409, detail="Обход уже выполняется — дождитесь завершения")
 
-    # Фиксируем "обход начат" синхронно, до ответа — иначе при быстром повторном клике
-    # вторая проверка is_crawling ещё не увидит первый запуск (фоновая задача стартует
-    # только после отправки ответа) и запустит обход дважды.
-    competitor.last_crawl_started_at = datetime.now(UTC)
-    competitor.last_crawl_finished_at = None
-    db.commit()
-
-    async def _run():
-        job_db = SessionLocal()
-        try:
-            job_competitor = job_db.get(Competitor, competitor_id)
-            if job_competitor:
-                await run_crawl_for_competitor(job_db, job_competitor)
-        except Exception:  # noqa: BLE001 — фоновая задача, ошибка уже логируется внутри pipeline
-            logger.exception("Ручной обход конкурента %s завершился ошибкой", competitor_id)
-        finally:
-            job_db.close()
-
-    background_tasks.add_task(_run)
     return {"status": "запущен обход", "competitor_id": competitor.id}
 
 

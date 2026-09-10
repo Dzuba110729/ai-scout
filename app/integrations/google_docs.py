@@ -36,7 +36,7 @@ _SCOPES = [
 _FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 _PROJECT_FOLDER_NAME = "AI-Скаут"
 
-_HEADER = ["Дата", "Тип изменения", "URL", "Категория", "УТП", "CTA", "Описание (ИИ)"]
+_HEADER = ["Дата", "Тип изменения", "URL", "Категория", "УТП", "CTA", "Описание (ИИ)", "Куда переехала"]
 
 _CHANGE_TYPE_LABELS = {
     ChangeType.NEW: "Новая страница",
@@ -44,20 +44,35 @@ _CHANGE_TYPE_LABELS = {
     ChangeType.REMOVED: "Страница удалена",
 }
 
+_MOVED_LABEL = "Страница переехала"
+
 
 class GoogleDocsError(Exception):
     """Сбой обращения к Google Docs/Drive API."""
 
 
-def build_row(page_diff: PageDiff, analysis: AiAnalysisResult | None, detected_at: datetime) -> list[str]:
+def build_row(
+    page_diff: PageDiff,
+    analysis: AiAnalysisResult | None,
+    detected_at: datetime,
+    *,
+    redirect_to: str | None = None,
+    redirect_summary: str | None = None,
+) -> list[str]:
+    """Строка таблицы отчёта. redirect_* заполняются, если страница не удалена, а переехала."""
+    summary_parts = [(analysis.summary if analysis else "") or ""]
+    if redirect_summary:
+        summary_parts.append(f"Теперь там: {redirect_summary}")
+
     return [
         detected_at.strftime("%Y-%m-%d %H:%M"),
-        _CHANGE_TYPE_LABELS[page_diff.change_type],
+        _MOVED_LABEL if redirect_to else _CHANGE_TYPE_LABELS[page_diff.change_type],
         page_diff.url,
         (analysis.category if analysis else "") or "",
         (analysis.usp if analysis else "") or "",
         (analysis.cta if analysis else "") or "",
-        (analysis.summary if analysis else "") or "",
+        "\n".join(part for part in summary_parts if part),
+        redirect_to or "",
     ]
 
 
@@ -171,8 +186,18 @@ class GoogleDocsClient:
         except HttpError as exc:
             raise GoogleDocsError(f"Не удалось создать папку конкурента: {exc}") from exc
 
-    def create_run_document(self, competitor_folder_id: str, run_at: datetime, rows: list[list[str]]) -> str:
-        """Создаёт документ прогона с таблицей находок в папке конкурента. Возвращает url."""
+    def create_run_document(
+        self,
+        competitor_folder_id: str,
+        run_at: datetime,
+        rows: list[list[str]],
+        notes: list[str] | None = None,
+    ) -> str:
+        """Создаёт документ прогона с таблицей находок в папке конкурента. Возвращает url.
+
+        notes — пояснения к прогону простым языком (например, что сайт больше, чем
+        мы успели посмотреть); идут отдельным абзацем перед таблицей.
+        """
         if not self.is_configured:
             raise GoogleDocsError("Google не настроен: заполните OAuth или сервисный аккаунт в .env")
 
@@ -191,6 +216,8 @@ class GoogleDocsClient:
             ).execute()
 
             self._set_landscape_orientation(doc_id, doc["documentStyle"]["pageSize"])
+            if notes:
+                self._insert_notes(doc_id, notes)
             self._insert_table(doc_id, [_HEADER, *rows])
 
             return f"https://docs.google.com/document/d/{doc_id}/edit"
@@ -219,13 +246,28 @@ class GoogleDocsClient:
             },
         ).execute()
 
+    def _insert_notes(self, doc_id: str, notes: list[str]) -> None:
+        text = "\n".join(notes) + "\n\n"
+        self._docs().documents().batchUpdate(
+            documentId=doc_id,
+            body={"requests": [{"insertText": {"location": {"index": 1}, "text": text}}]},
+        ).execute()
+
+    def _body_end_index(self, doc_id: str) -> int:
+        """Индекс, куда можно вставлять новый блок: конец тела минус завершающий перевод строки."""
+        doc = self._docs().documents().get(documentId=doc_id).execute()
+        return doc["body"]["content"][-1]["endIndex"] - 1
+
     def _insert_table(self, doc_id: str, all_rows: list[list[str]]) -> None:
         n_rows = len(all_rows)
         n_cols = len(all_rows[0])
 
+        # Вставляем в конец документа, а не в индекс 1: перед таблицей уже могут
+        # стоять пояснения к прогону, и жёсткая единица затолкала бы таблицу над ними.
+        index = self._body_end_index(doc_id)
         self._docs().documents().batchUpdate(
             documentId=doc_id,
-            body={"requests": [{"insertTable": {"rows": n_rows, "columns": n_cols, "location": {"index": 1}}}]},
+            body={"requests": [{"insertTable": {"rows": n_rows, "columns": n_cols, "location": {"index": index}}}]},
         ).execute()
 
         doc = self._docs().documents().get(documentId=doc_id).execute()

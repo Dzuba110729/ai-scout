@@ -76,6 +76,9 @@ async def crawl_competitor_via_apify(base_url: str, *, max_pages: int = 200) -> 
         result.pages[url] = _normalize_text(text)
         result.page_titles[url] = _extract_title(item)
 
+    # Apify не сообщает, сколько страниц на сайте всего — знаем только то, что принесли.
+    result.urls_total = len(result.pages)
+
     if not result.pages:
         logger.warning("Apify вернул 0 страниц для %s (run %s)", base_url, run.id)
         raise ApifyCrawlError(

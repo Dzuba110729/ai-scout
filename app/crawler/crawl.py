@@ -37,19 +37,32 @@ class CrawlResult:
     base_url: str
     pages: dict[str, str] = field(default_factory=dict)  # url -> нормализованный текст
     page_titles: dict[str, str] = field(default_factory=dict)
+    urls_total: int = 0  # сколько страниц нашли всего, ДО обрезки по лимиту
+
+    @property
+    def is_truncated(self) -> bool:
+        """Сайт больше, чем мы успеваем обойти за прогон — владельцу это надо сказать
+        явно, иначе непонятно, почему в отчёте виден не весь сайт."""
+        return self.urls_total > len(self.pages)
 
 
 def _same_domain(url: str, base_netloc: str) -> bool:
     return urlparse(url).netloc == base_netloc
 
 
-def _normalize_url(url: str) -> str:
+def normalize_url(url: str) -> str:
     url, _fragment = urldefrag(url)
     return url.rstrip("/") or url
 
 
-async def discover_urls_from_sitemap(base_url: str, *, max_pages: int = DEFAULT_MAX_PAGES) -> list[str]:
-    """Пытается получить список URL из sitemap.xml (быстрее и надёжнее, чем обход ссылок)."""
+async def discover_urls_from_sitemap(
+    base_url: str, *, max_pages: int = DEFAULT_MAX_PAGES
+) -> tuple[list[str], int]:
+    """Список URL из sitemap.xml (быстрее и надёжнее, чем обход ссылок).
+
+    Возвращает (страницы под лимит, сколько всего нашлось) — второе число нужно,
+    чтобы отчёт мог честно сказать "сайт больше, чем мы посмотрели".
+    """
     sitemap_url = urljoin(base_url, "/sitemap.xml")
     urls: list[str] = []
 
@@ -57,15 +70,15 @@ async def discover_urls_from_sitemap(base_url: str, *, max_pages: int = DEFAULT_
         try:
             response = await client.get(sitemap_url)
         except httpx.HTTPError:
-            return []
+            return [], 0
 
         if response.status_code != 200:
-            return []
+            return [], 0
 
         try:
             root = ElementTree.fromstring(response.content)
         except ElementTree.ParseError:
-            return []
+            return [], 0
 
         # sitemap index — верхнеуровневый файл со ссылками на другие sitemap'ы
         sitemap_locs = [loc.text for loc in root.findall(".//sm:sitemap/sm:loc", _SITEMAP_NS) if loc.text]
@@ -87,8 +100,11 @@ async def discover_urls_from_sitemap(base_url: str, *, max_pages: int = DEFAULT_
             urls = [loc.text for loc in root.findall(".//sm:url/sm:loc", _SITEMAP_NS) if loc.text]
 
     base_netloc = urlparse(base_url).netloc
-    deduped = {_normalize_url(u) for u in urls if _same_domain(u, base_netloc)}
-    return list(deduped)[:max_pages]
+    deduped = {normalize_url(u) for u in urls if _same_domain(u, base_netloc)}
+    # Сортировка обязательна: раньше лимит резал НЕупорядоченное множество, поэтому
+    # каждый прогон брал другие 200 страниц из 500 — и разница между прогонами
+    # выглядела как сотни новых и сотни удалённых страниц.
+    return sorted(deduped)[:max_pages], len(deduped)
 
 
 async def discover_urls_by_crawling(
@@ -99,7 +115,7 @@ async def discover_urls_by_crawling(
 ) -> list[str]:
     """BFS-обход ссылок с главной страницы, если sitemap.xml недоступен."""
     base_netloc = urlparse(base_url).netloc
-    seen: set[str] = {_normalize_url(base_url)}
+    seen: set[str] = {normalize_url(base_url)}
     queue: list[str] = [base_url]
     discovered: list[str] = []
 
@@ -124,7 +140,7 @@ async def discover_urls_by_crawling(
 
             hrefs = await page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
             for href in hrefs:
-                normalized = _normalize_url(href)
+                normalized = normalize_url(href)
                 if normalized not in seen and _same_domain(normalized, base_netloc):
                     seen.add(normalized)
                     queue.append(normalized)
@@ -170,11 +186,14 @@ async def crawl_competitor(
     Останавливается сразу при первой блокировке (CompetitorBlockedError) —
     без ретраев, как того требует архитектура (см. CLAUDE.md).
     """
-    urls = await discover_urls_from_sitemap(base_url, max_pages=max_pages)
+    urls, urls_total = await discover_urls_from_sitemap(base_url, max_pages=max_pages)
     if not urls:
         urls = await discover_urls_by_crawling(context, base_url, max_pages=max_pages)
+        # При обходе по ссылкам мы не знаем, сколько страниц у сайта всего: очередь
+        # обрывается на лимите. Упёрлись в лимит — значит страниц точно больше.
+        urls_total = len(urls) + 1 if len(urls) >= max_pages else len(urls)
 
-    result = CrawlResult(base_url=base_url)
+    result = CrawlResult(base_url=base_url, urls_total=urls_total)
     for url in urls:
         title, text = await fetch_page_text(context, url)
         result.pages[url] = text

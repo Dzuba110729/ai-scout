@@ -2,7 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models import ChangeType, SessionStatus
+from app.models import ChangeType, DisappearanceReason, SessionStatus
 
 
 class CompetitorCreate(BaseModel):
@@ -58,3 +58,16 @@ class PageChangeOut(BaseModel):
     page_url: str
     competitor_name: str
     ai_analysis: AiAnalysisOut | None
+
+    # Заполняются, когда страница пропала из обхода: удалена, переехала или просто
+    # не попала в этот обход (см. DisappearanceReason).
+    disappearance_reason: DisappearanceReason | None = None
+    redirect_to_url: str | None = None
+    redirect_target_summary: str | None = None
+
+
+class CrawlAllOut(BaseModel):
+    status: str
+    started: int
+    skipped: int
+    paused: int

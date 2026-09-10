@@ -34,6 +34,9 @@ def list_changes(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)
             page_url=change.page.url,
             competitor_name=change.page.competitor.name,
             ai_analysis=change.ai_analysis,
+            disappearance_reason=change.page.disappearance_reason,
+            redirect_to_url=change.page.redirect_to_url,
+            redirect_target_summary=change.page.redirect_target_summary,
         )
         for change in changes
     ]

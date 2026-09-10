@@ -32,6 +32,19 @@ class NotificationStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class DisappearanceReason(str, enum.Enum):
+    """Почему страница пропала из результатов обхода.
+
+    MISSING_FROM_CRAWL — страница по-прежнему открывается, просто не попала в этот
+    обход (упёрлись в лимит страниц или её убрали из карты сайта). Удалённой такая
+    страница НЕ считается: раньше именно она давала ложные тревоги в отчётах.
+    """
+
+    DELETED = "deleted"
+    MOVED = "moved"
+    MISSING_FROM_CRAWL = "missing_from_crawl"
+
+
 class Competitor(Base):
     __tablename__ = "competitors"
 
@@ -74,6 +87,17 @@ class Page(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     is_removed: Mapped[bool] = mapped_column(default=False)
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disappearance_reason: Mapped[DisappearanceReason | None] = mapped_column(
+        Enum(
+            DisappearanceReason,
+            name="disappearance_reason",
+            values_callable=lambda e: [m.value for m in e],
+        ),
+        nullable=True,
+    )
+    redirect_to_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    redirect_target_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     competitor: Mapped["Competitor"] = relationship(back_populates="pages")
     snapshots: Mapped[list["PageSnapshot"]] = relationship(

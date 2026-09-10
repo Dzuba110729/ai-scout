@@ -1,15 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Конкуренты — AI-Скаут{% endblock %}
 {% block content %}
-<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+<div class="page-header" style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px;">
     <h1 style="margin:0;">Конкуренты</h1>
-    <button type="button" id="open-add-dialog">+ Добавить конкурента</button>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <span class="muted" id="crawl-all-status"></span>
+        <button type="button" class="secondary-btn" id="crawl-all-btn">Обойти всех</button>
+        <button type="button" id="open-add-dialog">+ Добавить конкурента</button>
+    </div>
 </div>
 
 {% if not competitors %}
 <p class="muted">Пока нет ни одного конкурента — добавьте первого кнопкой выше.</p>
 {% else %}
-<div class="card" style="padding:0;">
+<div class="card table-wrap" style="padding:0;">
     <table class="data-table">
         <thead>
             <tr>
@@ -88,6 +92,23 @@ async function postJson(url, body) {
     }
     return response.json();
 }
+
+document.getElementById("crawl-all-btn").addEventListener("click", async (event) => {
+    const status = document.getElementById("crawl-all-status");
+    event.target.disabled = true;
+    status.textContent = "Запускаю…";
+    try {
+        const result = await postJson("/api/competitors/crawl-all", {});
+        const parts = [`запущено: ${result.started}`];
+        if (result.skipped) parts.push(`уже идут: ${result.skipped}`);
+        if (result.paused) parts.push(`на паузе: ${result.paused}`);
+        status.textContent = parts.join(", ");
+        setTimeout(() => location.reload(), 1200);
+    } catch (err) {
+        status.textContent = err.message;
+        event.target.disabled = false;
+    }
+});
 
 const addDialog = document.getElementById("add-dialog");
 document.getElementById("open-add-dialog").addEventListener("click", () => addDialog.showModal());

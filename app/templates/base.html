@@ -97,6 +97,20 @@
         pre.diff { background: #17181c; color: #eee; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
         pre.diff .add { color: #7ee787; }
         pre.diff .del { color: #ff7b72; }
+        /* --- Двухколоночный вид «было/стало» --- */
+        .sbs { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; max-height: 620px; overflow-y: auto; }
+        .sbs-head, .sbs-row { display: grid; grid-template-columns: 1fr 1fr; }
+        .sbs-head { position: sticky; top: 0; background: #fafbfc; border-bottom: 1px solid var(--border); z-index: 1; }
+        .sbs-col-title { padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--muted); }
+        .sbs-col-title + .sbs-col-title { border-left: 1px solid var(--border); }
+        .sbs-cell { padding: 6px 12px; font-size: 13px; line-height: 1.5; word-break: break-word; }
+        .sbs-cell + .sbs-cell { border-left: 1px solid var(--border); }
+        .sbs-equal { color: var(--muted); }
+        .sbs-changed .sbs-old, .sbs-removed .sbs-old { background: #ffeef0; }
+        .sbs-changed .sbs-new, .sbs-added .sbs-new { background: #e6ffed; }
+        .sbs-skip { padding: 4px 12px; font-size: 12px; color: var(--muted); background: #fafbfc; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+        .sbs-label { display: none; }
+        .only-narrow { display: none; }
         .page-content { max-height: 520px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; }
         .page-content p { margin: 0 0 8px; font-size: 14px; line-height: 1.5; }
         .page-content p:last-child { margin-bottom: 0; }
@@ -156,10 +170,111 @@
         .filter-bar { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; margin-bottom: 16px; }
 
         .breadcrumb { margin-bottom: 12px; }
+
+        /* --- Постраничная навигация --- */
+        .pager {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 12px; flex-wrap: wrap; margin: 12px 0;
+        }
+        .pager-info { font-size: 13px; color: var(--muted); }
+        .pager-sub { display: block; }
+        .pager-buttons { display: flex; gap: 8px; }
+        .pager-buttons .btn { text-decoration: none; }
+        .pager-disabled { opacity: 0.45; cursor: default; }
+
+        /* Длинные адреса страниц не должны растягивать вёрстку. */
+        .muted, .breadcrumb, td a.link, .pager-info, .page-content p { overflow-wrap: anywhere; }
+
+        /* Таблицы шире экрана прокручиваются внутри своего блока, а не всей страницей. */
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .table-wrap table.data-table { min-width: 640px; }
+
+        /* --- Верхняя панель с кнопкой меню: только на узком экране --- */
+        .topbar { display: none; }
+        .sidebar-overlay { display: none; }
+
+        @media (max-width: 860px) {
+            body { display: block; padding-top: 52px; }
+
+            .topbar {
+                display: flex; align-items: center; gap: 12px;
+                position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 30;
+                background: var(--sidebar-bg); color: #fff; padding: 0 12px;
+            }
+            .topbar-brand { font-weight: 700; font-size: 16px; }
+            .menu-toggle {
+                background: none; border: none; color: #fff; font-size: 22px;
+                line-height: 1; padding: 8px 10px; border-radius: 6px; cursor: pointer;
+            }
+
+            .sidebar {
+                position: fixed; top: 0; left: 0; z-index: 40;
+                width: 260px; flex-basis: 260px; height: 100vh; padding-top: 20px;
+                transform: translateX(-100%); transition: transform 0.2s ease;
+                overflow-y: auto;
+            }
+            body.menu-open .sidebar { transform: translateX(0); }
+            body.menu-open { overflow: hidden; }
+
+            .sidebar-overlay {
+                display: block; position: fixed; inset: 0; z-index: 35;
+                background: rgba(0,0,0,0.45);
+            }
+            .sidebar-overlay[hidden] { display: none; }
+
+            .sidebar nav a { padding: 14px 20px; font-size: 15px; }
+
+            .content { padding: 16px 14px; max-width: 100%; }
+            h1 { font-size: 18px; }
+            .card { padding: 14px 16px; }
+
+            /* Фильтры ленты складываются в колонку. */
+            .filter-bar { flex-direction: column; align-items: stretch; }
+            .filter-bar .field, .filter-bar input, .filter-bar select { width: 100%; }
+            .filter-bar > .btn, .filter-bar > button { width: 100%; text-align: center; }
+
+            /* Пальцем надо попадать: увеличенные кнопки и поля ввода. */
+            button, .btn { padding: 11px 16px; font-size: 14px; min-height: 44px; }
+            .tabs button.tab-btn { min-height: 44px; padding: 10px 2px; margin-right: 14px; }
+            input, select { padding: 10px 12px; font-size: 16px; min-height: 44px; }
+
+            /* Две колонки «было/стало» не помещаются рядом — ставим друг под друга
+               и подписываем каждую, иначе непонятно, где что. */
+            .sbs-head { display: none; }
+            .sbs-row { grid-template-columns: 1fr; }
+            .sbs-cell:empty { display: none; }
+            .sbs-cell + .sbs-cell { border-left: none; }
+            .sbs-row { border-bottom: 1px solid var(--border); }
+            .sbs-label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; }
+            .only-wide { display: none; }
+            .only-narrow { display: inline; }
+
+            .pager { flex-direction: column; align-items: stretch; }
+            .pager-buttons { display: grid; grid-template-columns: 1fr 1fr; }
+            .pager-buttons .btn { text-align: center; }
+
+            .stat-grid { grid-template-columns: repeat(2, 1fr); }
+            .stat-tile .value { font-size: 22px; }
+
+            .tabs { overflow-x: auto; }
+            .tabs button.tab-btn { white-space: nowrap; }
+
+            .page-content { max-height: 360px; }
+            pre.diff { font-size: 12px; }
+
+            /* Заголовки страниц с кнопкой справа: в колонку. */
+            .page-header { flex-direction: column; align-items: stretch !important; gap: 12px; }
+            .page-header button, .page-header .btn { width: 100%; text-align: center; }
+        }
     </style>
 </head>
 <body>
-    <aside class="sidebar">
+    <header class="topbar">
+        <button type="button" class="menu-toggle" id="menu-toggle" aria-label="Открыть меню" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
+        <span class="topbar-brand">AI-Скаут</span>
+    </header>
+    <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
+    <aside class="sidebar" id="sidebar">
         <div class="brand">AI-Скаут</div>
         <nav>
             <a href="/" class="{{ 'active' if active_nav == 'dashboard' else '' }}"><span class="icon">&#9673;</span> Дашборд</a>
@@ -171,5 +286,24 @@
     <main class="content">
         {% block content %}{% endblock %}
     </main>
+    <script>
+    (function () {
+        const toggle = document.getElementById("menu-toggle");
+        const sidebar = document.getElementById("sidebar");
+        const overlay = document.getElementById("sidebar-overlay");
+
+        function setMenu(open) {
+            document.body.classList.toggle("menu-open", open);
+            overlay.hidden = !open;
+            toggle.setAttribute("aria-expanded", open ? "true" : "false");
+            toggle.setAttribute("aria-label", open ? "Закрыть меню" : "Открыть меню");
+        }
+
+        toggle.addEventListener("click", () => setMenu(!document.body.classList.contains("menu-open")));
+        overlay.addEventListener("click", () => setMenu(false));
+        document.addEventListener("keydown", (e) => { if (e.key === "Escape") setMenu(false); });
+        sidebar.querySelectorAll("nav a").forEach((a) => a.addEventListener("click", () => setMenu(false)));
+    })();
+    </script>
 </body>
 </html>

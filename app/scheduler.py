@@ -2,8 +2,11 @@
 
 Расписание общее для всех конкурентов (ScheduleConfig, редактируется через UI),
 но каждый конкурент обходится своей независимой job — APScheduler запускает их
-как отдельные asyncio-задачи, поэтому конкуренты обходятся параллельно, а не
-один за другим в общем цикле.
+как отдельные asyncio-задачи, поэтому конкуренты обходятся параллельно.
+
+Сам запуск обхода планировщик не делает: и он, и кнопка в интерфейсе идут через
+app/crawl_manager.py — там и защита от повторного запуска, и общий лимит
+одновременных обходов.
 """
 
 import logging
@@ -12,9 +15,9 @@ from datetime import UTC, datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from app import crawl_manager
 from app.db import SessionLocal
 from app.models import Competitor, ScheduleConfig
-from app.pipeline import run_crawl_for_competitor
 
 logger = logging.getLogger(__name__)
 
@@ -47,21 +50,19 @@ async def _run_scheduled_crawl(competitor_id: int) -> None:
         competitor = db.get(Competitor, competitor_id)
         if competitor is None:
             return
-        if competitor.is_crawling:
+
+        if not await crawl_manager.run_now(db, competitor):
             logger.info(
-                "Плановый обход конкурента %s пропущен — уже выполняется другой обход", competitor.name
+                "Плановый обход конкурента %s пропущен — он на паузе или обход уже идёт",
+                competitor.name,
             )
-            return
-        try:
-            await run_crawl_for_competitor(db, competitor)
-        except Exception:
-            db.rollback()
-            logger.exception("Плановый обход конкурента %s завершился ошибкой", competitor.name)
-        finally:
-            config = get_schedule_config(db)
-            competitor.next_crawl_at = datetime.now(UTC) + interval_timedelta(config)
-            db.add(competitor)
-            db.commit()
+
+        config = get_schedule_config(db)
+        # Обход шёл в своей сессии БД — наша копия конкурента устарела.
+        db.expire(competitor)
+        competitor.next_crawl_at = datetime.now(UTC) + interval_timedelta(config)
+        db.add(competitor)
+        db.commit()
     finally:
         db.close()
 

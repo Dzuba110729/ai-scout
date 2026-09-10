@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_change_card.html" import change_card %}
+{% from "_pagination.html" import pagination as pagination_nav %}
 {% block title %}{{ competitor.name }} — AI-Скаут{% endblock %}
 {% block content %}
 {% if not competitor %}
@@ -7,7 +8,7 @@
 {% else %}
 <div class="breadcrumb"><a class="link" href="/competitors">← к списку конкурентов</a></div>
 
-<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:20px;">
+<div class="page-header" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:20px;">
     <div>
         <h1 style="margin:0 0 4px;">{{ competitor.name }}</h1>
         <span class="muted">{{ competitor.base_url }}</span>
@@ -22,7 +23,7 @@
 <div class="tabs">
     <button type="button" class="tab-btn active" data-tab="overview">Обзор</button>
     <button type="button" class="tab-btn" data-tab="pages">Страницы ({{ pages|length }})</button>
-    <button type="button" class="tab-btn" data-tab="history">История изменений ({{ changes|length }})</button>
+    <button type="button" class="tab-btn" data-tab="history">История изменений ({{ pagination.total }})</button>
 </div>
 
 <div class="tab-panel active" data-tab-panel="overview">
@@ -48,7 +49,7 @@
                 </span>
             </div>
         </div>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
             {% if competitor.is_crawling %}
             <button type="button" disabled>Обход идёт…</button>
             {% else %}
@@ -66,7 +67,7 @@
     {% if not pages %}
     <p class="muted">Страницы появятся после первого обхода.</p>
     {% else %}
-    <div class="card" style="padding:0;">
+    <div class="card table-wrap" style="padding:0;">
         <table class="data-table">
             <thead>
                 <tr><th>URL</th><th>Заголовок</th><th>Впервые увидена</th><th>Обновлена</th><th></th></tr>
@@ -91,21 +92,37 @@
     {% if not changes %}
     <p class="muted">Изменений по этому конкуренту пока нет.</p>
     {% else %}
+    {{ pagination_nav(pagination, page_url_base, anchor="#history") }}
     {% for change in changes %}
         {{ change_card(change) }}
     {% endfor %}
+    {{ pagination_nav(pagination, page_url_base, anchor="#history") }}
     {% endif %}
 </div>
 
 <script>
+function openTab(name) {
+    const btn = document.querySelector(`.tab-btn[data-tab="${name}"]`);
+    const panel = document.querySelector(`.tab-panel[data-tab-panel="${name}"]`);
+    if (!btn || !panel) return;
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+    btn.classList.add("active");
+    panel.classList.add("active");
+}
+
 document.querySelectorAll(".tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-        document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-        btn.classList.add("active");
-        document.querySelector(`.tab-panel[data-tab-panel="${btn.dataset.tab}"]`).classList.add("active");
+        openTab(btn.dataset.tab);
+        history.replaceState(null, "", `#${btn.dataset.tab}`);
     });
 });
+
+// Переход по страницам истории перезагружает страницу, поэтому нужную вкладку
+// возвращаем по якорю в адресе (#history).
+if (location.hash) {
+    openTab(location.hash.slice(1));
+}
 
 function formatCountdown(ms) {
     if (ms <= 0) return "обход вот-вот начнётся";

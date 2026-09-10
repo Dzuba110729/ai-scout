@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_change_card.html" import change_card %}
+{% from "_pagination.html" import pagination as pagination_nav %}
 {% block title %}Лента изменений — AI-Скаут{% endblock %}
 {% block content %}
 <h1>Лента изменений</h1>
@@ -36,8 +37,10 @@
 {% if not changes %}
 <p class="muted">По этим фильтрам изменений не найдено.</p>
 {% else %}
+{{ pagination_nav(pagination, page_url_base) }}
 {% for change in changes %}
     {{ change_card(change, show_competitor=True) }}
 {% endfor %}
+{{ pagination_nav(pagination, page_url_base) }}
 {% endif %}
 {% endblock %}

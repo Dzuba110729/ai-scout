@@ -27,7 +27,7 @@
 <div class="card">
     <h2>Требуют внимания</h2>
     {% for c in attention_competitors %}
-    <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; {{ 'border-top:1px solid var(--border);' if not loop.first else '' }}">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 0; {{ 'border-top:1px solid var(--border);' if not loop.first else '' }}">
         <div>
             <a class="link" href="/competitors/{{ c.id }}"><strong>{{ c.name }}</strong></a>
             <span class="badge badge-{{ c.status.value }}">нужна ручная сессия</span>

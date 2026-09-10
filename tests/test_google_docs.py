@@ -36,6 +36,32 @@ def test_build_row_without_analysis_uses_empty_strings():
     assert row[3] == row[4] == row[5] == row[6] == ""
 
 
+def test_build_row_for_moved_page_shows_target_and_what_is_there_now():
+    page_diff = PageDiff(url="https://x.ru/old", change_type=ChangeType.REMOVED, old_text="текст")
+
+    row = build_row(
+        page_diff,
+        None,
+        datetime.now(UTC),
+        redirect_to="https://x.ru/new",
+        redirect_summary="Страница курса по физике со скидкой 30%",
+    )
+
+    assert row[1] == "Страница переехала"
+    assert row[2] == "https://x.ru/old"
+    assert "Теперь там: Страница курса по физике" in row[6]
+    assert row[7] == "https://x.ru/new"
+
+
+def test_build_row_for_deleted_page_leaves_redirect_column_empty():
+    page_diff = PageDiff(url="https://x.ru/old", change_type=ChangeType.REMOVED, old_text="текст")
+
+    row = build_row(page_diff, None, datetime.now(UTC))
+
+    assert row[1] == "Страница удалена"
+    assert row[7] == ""
+
+
 def test_client_not_configured_without_any_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr("app.integrations.google_docs.settings.google_service_account_json_path", "")
     monkeypatch.setattr(

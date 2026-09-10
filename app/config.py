@@ -35,6 +35,16 @@ class Settings(BaseSettings):
     crawl_request_delay_seconds: float = 2.0
     crawl_max_pages: int = 200
 
+    # Сколько конкурентов обходим одновременно. Каждый обход поднимает свой
+    # браузер, поэтому без потолка десять конкурентов съедят всю память сервера.
+    crawl_concurrency: int = 3
+
+    # Перепроверка страниц, пропавших из результатов обхода (удалена / переехала /
+    # просто не попала в этот обход). Обычные HTTP-запросы, без браузера.
+    crawl_recheck_max_pages: int = 100
+    crawl_recheck_concurrency: int = 5
+    crawl_recheck_timeout_seconds: float = 15.0
+
     log_level: str = "INFO"
 
 

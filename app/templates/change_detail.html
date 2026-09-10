@@ -18,6 +18,25 @@
 </span>
 <p class="muted">{{ change.detected_at.strftime("%d.%m.%Y %H:%M") }}</p>
 
+{% set reason = change.page.disappearance_reason.value if change.page.disappearance_reason else None %}
+{% if reason == "moved" %}
+<div class="card">
+    <h3>Страница переехала</h3>
+    <p>Старый адрес больше не открывается — с него перебрасывает на другую страницу:</p>
+    <p><a class="link" href="{{ change.page.redirect_to_url }}" target="_blank">{{ change.page.redirect_to_url }}</a></p>
+    {% if change.page.redirect_target_summary %}
+    <p><strong>Что там теперь:</strong> {{ change.page.redirect_target_summary }}</p>
+    {% endif %}
+</div>
+{% elif reason == "missing_from_crawl" %}
+<div class="card">
+    <h3>Страница пропала из обхода</h3>
+    <p>Сама страница открывается, но её не оказалось в этом обходе — скорее всего, конкурент
+        убрал ссылку на неё из меню и карты сайта, либо она не поместилась в лимит страниц.
+        Это не удаление.</p>
+</div>
+{% endif %}
+
 {% if change.ai_analysis %}
 <div class="card">
     <h3>ИИ-анализ</h3>
@@ -28,7 +47,30 @@
 </div>
 {% endif %}
 
-{% if change.change_type.value == "changed" and change.diff_text %}
+{% if change.change_type.value == "changed" and side_by_side %}
+<div class="card">
+    <h3>Было / стало</h3>
+    <p class="muted"><span class="only-wide">Слева — как было в прошлый обход, справа — как стало сейчас.</span><span
+            class="only-narrow">Сверху каждой пары — как было в прошлый обход, снизу — как стало сейчас.</span>
+        Красным отмечено убранное, зелёным — добавленное.</p>
+    <div class="sbs">
+        <div class="sbs-head">
+            <div class="sbs-col-title">Было</div>
+            <div class="sbs-col-title">Стало</div>
+        </div>
+        {% for row in side_by_side %}
+            {% if row.kind == "skip" %}
+        <div class="sbs-skip">без изменений: {{ row.skipped }} стр.</div>
+            {% else %}
+        <div class="sbs-row sbs-{{ row.kind }}">
+            <div class="sbs-cell sbs-old">{% if row.old_line %}<span class="sbs-label">Было</span>{{ row.old_line }}{% endif %}</div>
+            <div class="sbs-cell sbs-new">{% if row.new_line %}<span class="sbs-label">Стало</span>{{ row.new_line }}{% endif %}</div>
+        </div>
+            {% endif %}
+        {% endfor %}
+    </div>
+</div>
+{% elif change.change_type.value == "changed" and change.diff_text %}
 <div class="card">
     <h3>Было / стало</h3>
     <pre class="diff">{% for line in change.diff_text.split("\n") -%}
