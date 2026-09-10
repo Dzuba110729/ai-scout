@@ -23,6 +23,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from app.ai.analyze import AiAnalysisResult
+from app.ai.compare import ComparisonResult
 from app.config import settings
 from app.crawler.diff import ChangeType, PageDiff
 
@@ -36,7 +37,18 @@ _SCOPES = [
 _FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 _PROJECT_FOLDER_NAME = "AI-Скаут"
 
-_HEADER = ["Дата", "Тип изменения", "URL", "Категория", "УТП", "CTA", "Описание (ИИ)", "Куда переехала"]
+_HEADER = [
+    "Дата",
+    "Тип изменения",
+    "URL",
+    "Категория",
+    "УТП (чем конкурент выделяется)",
+    "Призыв к действию",
+    "Описание (ИИ)",
+    "Куда переехала",
+    "Есть ли такое у нас",
+    "Чем отличается и чего нам не хватает",
+]
 
 _CHANGE_TYPE_LABELS = {
     ChangeType.NEW: "Новая страница",
@@ -58,8 +70,13 @@ def build_row(
     *,
     redirect_to: str | None = None,
     redirect_summary: str | None = None,
+    comparison: ComparisonResult | None = None,
 ) -> list[str]:
-    """Строка таблицы отчёта. redirect_* заполняются, если страница не удалена, а переехала."""
+    """Строка таблицы отчёта.
+
+    redirect_* заполняются, если страница не удалена, а переехала; comparison —
+    ответ на вопрос «есть ли такое у нас на сайте» (пусто, если не сравнивали).
+    """
     summary_parts = [(analysis.summary if analysis else "") or ""]
     if redirect_summary:
         summary_parts.append(f"Теперь там: {redirect_summary}")
@@ -73,7 +90,28 @@ def build_row(
         (analysis.cta if analysis else "") or "",
         "\n".join(part for part in summary_parts if part),
         redirect_to or "",
+        _comparison_verdict_cell(comparison),
+        _comparison_details_cell(comparison),
     ]
+
+
+def _comparison_verdict_cell(comparison: ComparisonResult | None) -> str:
+    if comparison is None:
+        return ""
+    if comparison.our_url:
+        return f"{comparison.label}\n{comparison.our_url}"
+    return comparison.label
+
+
+def _comparison_details_cell(comparison: ComparisonResult | None) -> str:
+    if comparison is None:
+        return ""
+    parts = []
+    if comparison.differences:
+        parts.append(f"Отличия: {comparison.differences}")
+    if comparison.missing:
+        parts.append(f"Чего нам не хватает: {comparison.missing}")
+    return "\n".join(parts)
 
 
 def build_insert_text_requests(cell_starts: list[int], values: list[str]) -> list[dict]:

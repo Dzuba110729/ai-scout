@@ -10,6 +10,19 @@
     </div>
 </div>
 
+<div class="card own-site-card">
+    <span class="badge badge-own">наш сайт</span>
+    {% if own_site %}
+    <strong style="margin-left:6px;">{{ own_site.base_url }}</strong>
+    <div class="muted">Конкурентом не считается: с ним сравниваются находки, чтобы было видно,
+        есть ли такое же у нас. <a class="link" href="/settings">Настроить или обойти →</a></div>
+    {% else %}
+    <strong style="margin-left:6px;">не указан</strong>
+    <div class="muted">Укажите адрес своего сайта — и по каждой находке будет видно, есть ли такое
+        же у нас и чем оно отличается. <a class="link" href="/settings">Указать свой сайт →</a></div>
+    {% endif %}
+</div>
+
 {% if not competitors %}
 <p class="muted">Пока нет ни одного конкурента — добавьте первого кнопкой выше.</p>
 {% else %}

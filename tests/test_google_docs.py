@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from app.ai.analyze import AiAnalysisResult
+from app.ai.compare import ComparisonResult
 from app.crawler.diff import ChangeType, PageDiff
 from app.integrations.google_docs import (
     GoogleDocsClient,
@@ -60,6 +61,33 @@ def test_build_row_for_deleted_page_leaves_redirect_column_empty():
 
     assert row[1] == "Страница удалена"
     assert row[7] == ""
+
+
+def test_build_row_adds_comparison_with_our_site():
+    page_diff = PageDiff(url="https://x.ru/promo", change_type=ChangeType.NEW, new_text="текст")
+    comparison = ComparisonResult(
+        verdict="similar",
+        our_url="https://og1.ru/promo",
+        differences="У конкурента есть цена, у нас нет.",
+        missing="Добавить отзывы учеников.",
+        raw_response={},
+    )
+
+    row = build_row(page_diff, None, datetime.now(UTC), comparison=comparison)
+
+    assert "У нас похожее есть" in row[8]
+    assert "https://og1.ru/promo" in row[8]
+    assert "Отличия: У конкурента есть цена" in row[9]
+    assert "Чего нам не хватает: Добавить отзывы учеников." in row[9]
+
+
+def test_build_row_leaves_comparison_columns_empty_when_not_compared():
+    page_diff = PageDiff(url="https://x.ru/promo", change_type=ChangeType.NEW, new_text="текст")
+
+    row = build_row(page_diff, None, datetime.now(UTC))
+
+    assert row[8] == ""
+    assert row[9] == ""
 
 
 def test_client_not_configured_without_any_credentials(monkeypatch, tmp_path):

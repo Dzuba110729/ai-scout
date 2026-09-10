@@ -20,6 +20,52 @@
     </form>
 </div>
 
+<div class="card own-site-card">
+    <h2>Наш сайт <span class="badge badge-own">наш сайт</span></h2>
+    <p class="muted">Укажите адрес своего сайта — и по каждой находке у конкурентов инструмент
+        будет отвечать, есть ли такая же страница у нас, а если похожая — чем именно отличается
+        и чего нам не хватает. Свой сайт не попадает ни в ленту изменений, ни в отчёты по
+        конкурентам: он обходится только для того, чтобы список наших страниц был свежим.</p>
+
+    <form id="own-site-form" style="display:flex; align-items:end; gap:12px; flex-wrap:wrap;">
+        <label class="field" style="flex:1 1 260px;">
+            Адрес сайта
+            <input type="url" id="own-site-url" placeholder="https://og1.ru" style="width:100%;"
+                   value="{{ own_site.base_url if own_site else '' }}" required>
+        </label>
+        <button type="submit">Сохранить</button>
+        <span id="own-site-status" class="muted"></span>
+    </form>
+
+    <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:14px;">
+        <div>
+            <div class="muted">Последний обход нашего сайта</div>
+            {% if own_site and own_site.last_crawl_finished_at %}
+            {{ own_site.last_crawl_finished_at.strftime("%d.%m.%Y %H:%M") }}
+            {% elif own_site %}
+            ещё не было — сравнивать пока не с чем
+            {% else %}
+            сайт ещё не указан
+            {% endif %}
+        </div>
+        <div>
+            <div class="muted">Страниц найдено</div>
+            {% if own_site %}{{ own_site_pages_count }}{% else %}—{% endif %}
+        </div>
+    </div>
+
+    {% if own_site %}
+    <div style="margin-top:14px;">
+        {% if own_site.is_crawling %}
+        <button type="button" disabled>Обход идёт…</button>
+        {% else %}
+        <button type="button" id="own-site-crawl-btn" class="secondary-btn">Обойти наш сайт сейчас</button>
+        {% endif %}
+        <span id="own-site-crawl-status" class="muted"></span>
+    </div>
+    {% endif %}
+</div>
+
 <script>
 document.getElementById("schedule-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -42,5 +88,51 @@ document.getElementById("schedule-form").addEventListener("submit", async (event
         status.textContent = err.message;
     }
 });
+
+document.getElementById("own-site-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = document.getElementById("own-site-status");
+    const base_url = document.getElementById("own-site-url").value.trim();
+    status.textContent = "Сохраняю…";
+    try {
+        const response = await fetch("/api/own-site", {
+            method: "PUT",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({base_url}),
+        });
+        if (!response.ok) {
+            const detail = await response.json().catch(() => ({}));
+            throw new Error(typeof detail.detail === "string" ? detail.detail : `Ошибка ${response.status}`);
+        }
+        location.reload();
+    } catch (err) {
+        status.textContent = err.message;
+    }
+});
+
+const ownCrawlBtn = document.getElementById("own-site-crawl-btn");
+if (ownCrawlBtn) {
+    ownCrawlBtn.addEventListener("click", async () => {
+        const status = document.getElementById("own-site-crawl-status");
+        ownCrawlBtn.disabled = true;
+        status.textContent = "Запускаю…";
+        try {
+            const response = await fetch("/api/own-site/crawl", {method: "POST"});
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || `Ошибка ${response.status}`);
+            }
+            status.textContent = "Обход запущен, страница обновится";
+            setTimeout(() => location.reload(), 1500);
+        } catch (err) {
+            status.textContent = err.message;
+            ownCrawlBtn.disabled = false;
+        }
+    });
+}
+
+{% if own_site and own_site.is_crawling %}
+setTimeout(() => location.reload(), 5000);
+{% endif %}
 </script>
 {% endblock %}

@@ -2,12 +2,19 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models import ChangeType, DisappearanceReason, SessionStatus
+from app.models import ChangeType, ComparisonVerdict, DisappearanceReason, SessionStatus
 
 
 class CompetitorCreate(BaseModel):
     name: str
     base_url: str
+
+
+class OwnSiteUpdate(BaseModel):
+    """Адрес нашего собственного сайта — с ним сравниваются находки у конкурентов."""
+
+    base_url: str
+    name: str | None = None
 
 
 class CompetitorOut(BaseModel):
@@ -16,6 +23,7 @@ class CompetitorOut(BaseModel):
     id: int
     name: str
     base_url: str
+    is_own: bool
     status: SessionStatus
     is_paused: bool
     session_expires_at: datetime | None
@@ -48,6 +56,17 @@ class AiAnalysisOut(BaseModel):
     summary: str | None
 
 
+class OwnSiteComparisonOut(BaseModel):
+    """Есть ли такая же страница у нас на сайте и чем она отличается."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    verdict: ComparisonVerdict
+    our_page_url: str | None
+    differences: str | None
+    missing: str | None
+
+
 class PageChangeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -58,6 +77,7 @@ class PageChangeOut(BaseModel):
     page_url: str
     competitor_name: str
     ai_analysis: AiAnalysisOut | None
+    own_comparison: OwnSiteComparisonOut | None = None
 
     # Заполняются, когда страница пропала из обхода: удалена, переехала или просто
     # не попала в этот обход (см. DisappearanceReason).

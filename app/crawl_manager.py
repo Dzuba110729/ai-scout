@@ -123,8 +123,14 @@ def start_all(db: Session) -> CrawlAllResult:
 
     Обходы идут параллельно, но не больше CRAWL_CONCURRENCY одновременно —
     остальные ждут своей очереди на семафоре, а не в очереди на event loop.
+
+    Наш собственный сайт сюда не попадает: кнопка называется «обойти всех
+    конкурентов», и счётчики в ответе должны сходиться со списком конкурентов.
+    Он обходится по расписанию и отдельной кнопкой в настройках.
     """
-    competitors = db.query(Competitor).order_by(Competitor.id).all()
+    competitors = (
+        db.query(Competitor).filter(Competitor.is_own.is_(False)).order_by(Competitor.id).all()
+    )
 
     started = 0
     skipped_running = 0

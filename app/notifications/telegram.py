@@ -4,6 +4,7 @@ import logging
 
 import httpx
 
+from app.ai.compare import ComparisonResult
 from app.config import settings
 from app.crawler.diff import ChangeType, PageDiff
 
@@ -44,6 +45,36 @@ def format_finished_message(competitor_name: str, changes_count: int, report_url
     lines = [f"✅ Обход конкурента «{competitor_name}» завершён", f"Изменений найдено: {changes_count}"]
     if report_url:
         lines.append(f"Отчёт: {report_url}")
+    return "\n".join(lines)
+
+
+def format_comparison_summary(
+    comparisons: list[tuple[str, ComparisonResult]], limit: int = 5
+) -> str:
+    """Блок «есть ли такое у нас» для итогового сообщения об обходе.
+
+    Отдельным сообщением на каждую находку не шлём: при десятке изменений это
+    превратилось бы в спам. Длинный список обрезаем — полный лежит в отчёте.
+    """
+    lines = ["🔍 Сравнили с нашим сайтом:"]
+
+    for url, comparison in comparisons[:limit]:
+        lines.append("")
+        lines.append(url)
+        head = comparison.label
+        if comparison.our_url:
+            head = f"{head} — {comparison.our_url}"
+        lines.append(head)
+        if comparison.differences:
+            lines.append(f"Отличия: {comparison.differences}")
+        if comparison.missing:
+            lines.append(f"Чего нам не хватает: {comparison.missing}")
+
+    remaining = len(comparisons) - limit
+    if remaining > 0:
+        lines.append("")
+        lines.append(f"Ещё сравнений: {remaining} — смотрите в отчёте.")
+
     return "\n".join(lines)
 
 

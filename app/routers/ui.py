@@ -12,6 +12,7 @@ from app.config import BASE_DIR
 from app.db import get_db
 from app.diff_view import build_side_by_side
 from app.models import ChangeType, Competitor, Page, PageChange, SessionStatus
+from app.own_site import get_own_site
 from app.scheduler import get_schedule_config
 
 router = APIRouter(dependencies=[Depends(require_basic_auth)])
@@ -19,14 +20,21 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
 
 PAGE_SIZE = 25
 
+# Наш собственный сайт лежит в той же таблице, что и конкуренты (см. app/own_site.py),
+# но его изменения — не новости о рынке, поэтому во все ленты и счётчики он не идёт.
+_ONLY_COMPETITORS = Competitor.is_own.is_(False)
+
 
 def _changes_query():
     return (
         select(PageChange)
         .join(Page)
+        .join(Competitor)
+        .where(_ONLY_COMPETITORS)
         .options(
             joinedload(PageChange.page).joinedload(Page.competitor),
             joinedload(PageChange.ai_analysis),
+            joinedload(PageChange.own_comparison),
         )
     )
 
@@ -51,7 +59,7 @@ def _paginate_changes(db: Session, conditions: list, page: int) -> dict:
     Общее количество считается отдельным count-запросом (без joinedload и сортировки),
     чтобы не тянуть все строки в память ради подсчёта.
     """
-    count_stmt = select(func.count(PageChange.id)).join(Page)
+    count_stmt = select(func.count(PageChange.id)).join(Page).join(Competitor).where(_ONLY_COMPETITORS)
     stmt = _changes_query()
     for condition in conditions:
         count_stmt = count_stmt.where(condition)
@@ -82,15 +90,17 @@ def _paginate_changes(db: Session, conditions: list, page: int) -> dict:
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard_page(request: Request, db: Session = Depends(get_db)):
-    competitors = db.query(Competitor).all()
+    competitors = db.query(Competitor).filter(_ONLY_COMPETITORS).all()
     stats = {
         "total": len(competitors),
         "active": sum(1 for c in competitors if c.status == SessionStatus.ACTIVE),
         "needs_session": sum(1 for c in competitors if c.status == SessionStatus.NEEDS_SESSION),
         "changes_last_7d": db.scalar(
-            select(func.count(PageChange.id)).where(
-                PageChange.detected_at >= datetime.now(UTC) - timedelta(days=7)
-            )
+            select(func.count(PageChange.id))
+            .join(Page)
+            .join(Competitor)
+            .where(_ONLY_COMPETITORS)
+            .where(PageChange.detected_at >= datetime.now(UTC) - timedelta(days=7))
         )
         or 0,
     }
@@ -113,9 +123,17 @@ def dashboard_page(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/competitors", response_class=HTMLResponse)
 def competitors_page(request: Request, db: Session = Depends(get_db)):
-    competitors = db.query(Competitor).order_by(Competitor.created_at.desc()).all()
+    competitors = (
+        db.query(Competitor).filter(_ONLY_COMPETITORS).order_by(Competitor.created_at.desc()).all()
+    )
     return templates.TemplateResponse(
-        request, "competitors.html", {"active_nav": "competitors", "competitors": competitors}
+        request,
+        "competitors.html",
+        {
+            "active_nav": "competitors",
+            "competitors": competitors,
+            "own_site": get_own_site(db),
+        },
     )
 
 
@@ -177,7 +195,7 @@ def changes_page(
 
     pagination = _paginate_changes(db, conditions, _parse_page(page))
 
-    all_competitors = db.query(Competitor).order_by(Competitor.name).all()
+    all_competitors = db.query(Competitor).filter(_ONLY_COMPETITORS).order_by(Competitor.name).all()
 
     # Ссылки «Назад»/«Вперёд» должны сохранять выбранные фильтры.
     kept_filters = {"competitor_id": competitor_id, "change_type": change_type, "q": q}
@@ -204,6 +222,7 @@ def change_detail_page(change_id: int, request: Request, db: Session = Depends(g
         .options(
             joinedload(PageChange.page).joinedload(Page.competitor),
             joinedload(PageChange.ai_analysis),
+            joinedload(PageChange.own_comparison),
             joinedload(PageChange.old_snapshot),
             joinedload(PageChange.new_snapshot),
         )
@@ -227,6 +246,23 @@ def change_detail_page(change_id: int, request: Request, db: Session = Depends(g
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
     schedule = get_schedule_config(db)
+    own_site = get_own_site(db)
+
+    own_site_pages_count = 0
+    if own_site:
+        own_site_pages_count = db.scalar(
+            select(func.count(Page.id)).where(
+                Page.competitor_id == own_site.id, Page.is_removed.is_(False)
+            )
+        ) or 0
+
     return templates.TemplateResponse(
-        request, "settings.html", {"active_nav": "settings", "schedule": schedule}
+        request,
+        "settings.html",
+        {
+            "active_nav": "settings",
+            "schedule": schedule,
+            "own_site": own_site,
+            "own_site_pages_count": own_site_pages_count,
+        },
     )

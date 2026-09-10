@@ -45,12 +45,24 @@ class DisappearanceReason(str, enum.Enum):
     MISSING_FROM_CRAWL = "missing_from_crawl"
 
 
+class ComparisonVerdict(str, enum.Enum):
+    """Есть ли у нас на сайте то же, что появилось у конкурента."""
+
+    EXACT = "exact"
+    SIMILAR = "similar"
+    NONE = "none"
+
+
 class Competitor(Base):
     __tablename__ = "competitors"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(Text)
     base_url: Mapped[str] = mapped_column(Text)
+    # Наш собственный сайт заведён такой же строкой, чтобы переиспользовать краулер
+    # и таблицы страниц. Конкурентом он при этом не считается: не попадает ни в ленту
+    # изменений, ни в счётчики, ни в отчёты, ни в уведомления.
+    is_own: Mapped[bool] = mapped_column(default=False)
     status: Mapped[SessionStatus] = mapped_column(
         Enum(SessionStatus, name="session_status", values_callable=lambda e: [m.value for m in e]),
         default=SessionStatus.NEEDS_SESSION,
@@ -141,6 +153,9 @@ class PageChange(Base):
     ai_analysis: Mapped["AiAnalysis | None"] = relationship(
         back_populates="page_change", cascade="all, delete-orphan", uselist=False
     )
+    own_comparison: Mapped["OwnSiteComparison | None"] = relationship(
+        back_populates="page_change", cascade="all, delete-orphan", uselist=False
+    )
     notifications: Mapped[list["NotificationLog"]] = relationship(
         back_populates="page_change", cascade="all, delete-orphan"
     )
@@ -161,6 +176,31 @@ class AiAnalysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     page_change: Mapped["PageChange"] = relationship(back_populates="ai_analysis")
+
+
+class OwnSiteComparison(Base):
+    """Ответ на вопрос «есть ли такое у нас» по конкретной находке у конкурента."""
+
+    __tablename__ = "own_site_comparisons"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    page_change_id: Mapped[int] = mapped_column(
+        ForeignKey("page_changes.id", ondelete="CASCADE"), unique=True
+    )
+    verdict: Mapped[ComparisonVerdict] = mapped_column(
+        Enum(
+            ComparisonVerdict,
+            name="comparison_verdict",
+            values_callable=lambda e: [m.value for m in e],
+        )
+    )
+    our_page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    differences: Mapped[str | None] = mapped_column(Text, nullable=True)
+    missing: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    page_change: Mapped["PageChange"] = relationship(back_populates="own_comparison")
 
 
 class ScheduleConfig(Base):

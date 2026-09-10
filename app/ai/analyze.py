@@ -63,12 +63,17 @@ def build_prompt(page_diff: PageDiff) -> str:
     )
 
 
-def parse_ai_response(raw_text: str) -> AiAnalysisResult:
+def extract_json_object(raw_text: str) -> dict:
+    """Достаёт JSON-объект из ответа CLI: вокруг него бывает текст-обёртка."""
     match = _JSON_BLOCK_RE.search(raw_text)
     if not match:
         raise ValueError(f"В ответе ИИ не найден JSON: {raw_text[:200]!r}")
 
-    data = json.loads(match.group(0))
+    return json.loads(match.group(0))
+
+
+def parse_ai_response(raw_text: str) -> AiAnalysisResult:
+    data = extract_json_object(raw_text)
 
     return AiAnalysisResult(
         category=data.get("category"),

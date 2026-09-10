@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     crawl_recheck_concurrency: int = 5
     crawl_recheck_timeout_seconds: float = 15.0
 
+    # Сравнение находок конкурента с нашим сайтом («есть ли такое у нас»).
+    # Каждое сравнение — отдельный вызов ИИ, поэтому за один обход их число
+    # ограничено: без потолка обход с 200 новыми страницами дал бы 200 вызовов.
+    own_site_compare_max_per_run: int = 10
+    own_site_compare_candidates: int = 3
+    own_site_compare_text_limit: int = 3000
+
     log_level: str = "INFO"
 
 

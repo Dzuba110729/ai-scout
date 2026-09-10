@@ -12,6 +12,10 @@ class _FakeQuery:
     def __init__(self, items: list[Competitor]):
         self._items = items
 
+    def filter(self, *_args):
+        # start_all отсеивает наш собственный сайт; в этих тестах его нет.
+        return self
+
     def order_by(self, *_args):
         return self
 

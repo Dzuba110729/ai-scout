@@ -16,6 +16,18 @@
     {% if change.ai_analysis and change.ai_analysis.summary %}
     <p>{{ change.ai_analysis.summary }}</p>
     {% endif %}
+    {% if change.own_comparison %}
+    {% set cmp = change.own_comparison %}
+    <div class="own-check own-check-{{ cmp.verdict.value }}">
+        <strong>
+            {% if cmp.verdict.value == "exact" %}У нас такое есть
+            {% elif cmp.verdict.value == "similar" %}У нас похожее есть
+            {% else %}У нас такого нет{% endif %}
+        </strong>
+        {% if cmp.our_page_url %}<span class="muted">— {{ cmp.our_page_url }}</span>{% endif %}
+        {% if cmp.differences %}<div class="muted">Отличия: {{ cmp.differences|truncate(180) }}</div>{% endif %}
+    </div>
+    {% endif %}
 </div>
 </a>
 {% endmacro %}

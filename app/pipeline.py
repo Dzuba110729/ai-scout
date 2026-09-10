@@ -22,6 +22,7 @@ from app.ai.analyze import (
     parse_ai_response,
     run_claude_cli,
 )
+from app.ai.compare import ComparisonResult, OwnSite, compare_with_own_site
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import launch_browser, new_stealth_context, storage_state_path_for
@@ -32,10 +33,12 @@ from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError, buil
 from app.models import (
     AiAnalysis,
     ChangeType as DbChangeType,
+    ComparisonVerdict,
     Competitor,
     DisappearanceReason,
     NotificationLog,
     NotificationStatus,
+    OwnSiteComparison,
     Page,
     PageChange,
     PageSnapshot,
@@ -44,10 +47,12 @@ from app.models import (
 from app.notifications.telegram import (
     TelegramNotifier,
     format_blocked_message,
+    format_comparison_summary,
     format_error_message,
     format_finished_message,
     format_started_message,
 )
+from app.own_site import load_own_site
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,18 @@ async def _notify(notifier: TelegramNotifier, db: Session, competitor: Competito
     )
 
 
+async def _notify_progress(notifier: TelegramNotifier, db: Session, competitor: Competitor, text: str) -> None:
+    """Рутинные сообщения «обход начат / завершён» — только по конкурентам.
+
+    Наш собственный сайт обходится лишь ради свежих страниц для сравнения, его
+    обход новостью не является. Про сломавшийся обход сообщаем по любому сайту —
+    это идёт мимо этой функции.
+    """
+    if competitor.is_own:
+        return
+    await _notify(notifier, db, competitor, text, page_change_id=None)
+
+
 async def _crawl_competitor(competitor: Competitor) -> CrawlResult:
     """Сначала локальный Playwright (с сохранённой сессией, если она есть, иначе с чистым
     контекстом — этого достаточно для слабо защищённых сайтов), и только если он упёрся
@@ -155,7 +172,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
     # Отметку «обход идёт» уже поставил crawl_manager — синхронно, до постановки
     # фоновой задачи. Повторять здесь проверку is_crawling нельзя: раз мы внутри
     # функции, значит отметка только что выставлена и проверка всегда сработает.
-    await _notify(notifier, db, competitor, format_started_message(competitor.name), page_change_id=None)
+    await _notify_progress(notifier, db, competitor, format_started_message(competitor.name))
     db.commit()
 
     # Всё, что может пойти не так, оборачиваем одним try — иначе необработанное
@@ -182,7 +199,14 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         for url, check in checks.items():
             _apply_missing_check(previous_by_url[url][0], check, now)
 
+        own_site = await _load_own_site_for_comparison(db, competitor)
+        compare_urls: set[str] = set()
+        if own_site:
+            selected = select_diffs_for_comparison(diffs, settings.own_site_compare_max_per_run)
+            compare_urls = {d.url for d in selected}
+
         report_rows: list[list[str]] = []
+        comparisons: list[tuple[str, ComparisonResult]] = []
         for page_diff in diffs:
             page = _apply_page_diff(db, competitor, page_diff, previous_by_url)
             check = checks.get(page_diff.url)
@@ -194,6 +218,13 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             db.flush()  # получаем page_change.id до вызова ИИ
 
             analysis = await _analyze_and_store(db, page_change, page_diff)
+
+            comparison = None
+            if page_diff.url in compare_urls:
+                comparison = await _compare_with_own_site_and_store(db, page_change, page_diff, own_site)
+                if comparison:
+                    comparisons.append((page_diff.url, comparison))
+
             report_rows.append(
                 build_row(
                     page_diff,
@@ -201,6 +232,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
                     run_at,
                     redirect_to=moved,
                     redirect_summary=page.redirect_target_summary if moved else None,
+                    comparison=comparison,
                 )
             )
 
@@ -211,17 +243,20 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         notes = build_run_notes(crawl_result, checks)
 
         report_url = None
-        if report_rows:
+        # Отчёт в Google Docs — это отчёт по конкуренту; по нашему сайту он не нужен.
+        if report_rows and not competitor.is_own:
             report_url = await _write_run_report(db, competitor, run_at, report_rows, notes)
 
         competitor.last_crawl_finished_at = now
         db.add(competitor)
         await asyncio.to_thread(db.commit)
 
-        finished_message = format_finished_message(competitor.name, len(diffs), report_url)
+        message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
         if notes:
-            finished_message = "\n\n".join([finished_message, "\n".join(notes)])
-        await _notify(notifier, db, competitor, finished_message, page_change_id=None)
+            message_parts.append("\n".join(notes))
+        if comparisons:
+            message_parts.append(format_comparison_summary(comparisons))
+        await _notify_progress(notifier, db, competitor, "\n\n".join(message_parts))
         db.commit()
 
         logger.info("Обход конкурента %s завершён: %s изменений", competitor.name, len(diffs))
@@ -450,6 +485,59 @@ def _record_change(db: Session, page: Page, page_diff: PageDiff) -> PageChange:
     )
     db.add(page_change)
     return page_change
+
+
+def select_diffs_for_comparison(diffs: list[PageDiff], limit: int) -> list[PageDiff]:
+    """Какие находки сравнивать с нашим сайтом.
+
+    Удалённые страницы отсекаем: спрашивать «есть ли у нас такое» про то, чего уже
+    нет у конкурента, бессмысленно. Лимит нужен, потому что каждое сравнение — это
+    отдельный вызов ИИ: обход, нашедший 200 новых страниц, иначе сделал бы 200
+    вызовов. Новые страницы идут первыми — это самые важные находки.
+    """
+    if limit <= 0:
+        return []
+
+    new_pages = [d for d in diffs if d.change_type is ChangeType.NEW]
+    changed_pages = [d for d in diffs if d.change_type is ChangeType.CHANGED]
+    return (new_pages + changed_pages)[:limit]
+
+
+async def _load_own_site_for_comparison(db: Session, competitor: Competitor) -> OwnSite | None:
+    """Страницы нашего сайта для сравнения — или None, если сравнивать не с чем.
+
+    Сравнение — не обязательная часть обхода: пока владелец не завёл свой сайт (или
+    тот ни разу не обойден), обход конкурентов должен идти как раньше.
+    """
+    if competitor.is_own:
+        return None  # сам с собой сайт не сравниваем
+    return await asyncio.to_thread(load_own_site, db)
+
+
+async def _compare_with_own_site_and_store(
+    db: Session, page_change: PageChange, page_diff: PageDiff, own_site: OwnSite
+) -> ComparisonResult | None:
+    """Один вызов ИИ на находку. Ошибка ИИ не должна останавливать обход."""
+    try:
+        comparison = await compare_with_own_site(page_diff, own_site)
+    except (ClaudeCliError, ValueError) as exc:
+        logger.warning("Не удалось сравнить с нашим сайтом %s: %s", page_diff.url, exc)
+        return None
+
+    if comparison is None:
+        return None
+
+    db.add(
+        OwnSiteComparison(
+            page_change_id=page_change.id,
+            verdict=ComparisonVerdict(comparison.verdict),
+            our_page_url=comparison.our_url,
+            differences=comparison.differences,
+            missing=comparison.missing,
+            raw_response=comparison.raw_response,
+        )
+    )
+    return comparison
 
 
 async def _analyze_and_store(

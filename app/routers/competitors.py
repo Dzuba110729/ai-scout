@@ -18,7 +18,14 @@ router = APIRouter(prefix="/api/competitors", tags=["competitors"], dependencies
 
 @router.get("", response_model=list[CompetitorOut])
 def list_competitors(db: Session = Depends(get_db)):
-    return db.query(Competitor).order_by(Competitor.created_at.desc()).all()
+    # Наш собственный сайт живёт в этой же таблице, но конкурентом не является —
+    # он доступен через /api/own-site (см. app/own_site.py).
+    return (
+        db.query(Competitor)
+        .filter(Competitor.is_own.is_(False))
+        .order_by(Competitor.created_at.desc())
+        .all()
+    )
 
 
 @router.post("", response_model=CompetitorOut, status_code=201)

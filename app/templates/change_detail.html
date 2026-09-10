@@ -37,6 +37,24 @@
 </div>
 {% endif %}
 
+{% if change.own_comparison %}
+{% set cmp = change.own_comparison %}
+<div class="card own-check own-check-{{ cmp.verdict.value }}">
+    <h3>Есть ли такое у нас на сайте</h3>
+    <p><strong>
+        {% if cmp.verdict.value == "exact" %}У нас такое есть
+        {% elif cmp.verdict.value == "similar" %}У нас похожее есть
+        {% else %}У нас такого нет{% endif %}
+    </strong>
+    {% if cmp.our_page_url %}
+    — <a class="link" href="{{ cmp.our_page_url }}" target="_blank" rel="noopener">{{ cmp.our_page_url }}</a>
+    {% endif %}
+    </p>
+    {% if cmp.differences %}<p><strong>Отличия:</strong> {{ cmp.differences }}</p>{% endif %}
+    {% if cmp.missing %}<p><strong>Чего нам не хватает:</strong> {{ cmp.missing }}</p>{% endif %}
+</div>
+{% endif %}
+
 {% if change.ai_analysis %}
 <div class="card">
     <h3>ИИ-анализ</h3>

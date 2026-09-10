@@ -121,6 +121,19 @@
         .change-card { margin-bottom: 8px; box-shadow: none; border: 1px solid var(--border); }
         .change-card:last-child { margin-bottom: 0; }
         .danger-btn { background: #fdecea; color: #c62828; }
+
+        /* --- Блок «есть ли такое у нас на сайте» --- */
+        .own-check { border-left: 3px solid var(--border); padding-left: 12px; margin-top: 10px; font-size: 13px; }
+        .own-check p { margin: 0 0 6px; }
+        .own-check p:last-child { margin-bottom: 0; }
+        .own-check-exact { border-left-color: #1a7f37; }
+        .own-check-similar { border-left-color: #b28704; }
+        .own-check-none { border-left-color: #c62828; }
+        .card.own-check { border-left-width: 4px; border-left-style: solid; padding-left: 16px; font-size: 14px; }
+
+        /* --- Карточка «наш сайт»: явно не конкурент --- */
+        .own-site-card { border-left: 4px solid var(--sidebar-accent); }
+        .badge-own { background: #e8f0ff; color: #1a4fa0; }
         button, .btn {
             background: var(--sidebar-bg); color: #fff; border: none; border-radius: 6px;
             padding: 6px 12px; font-size: 13px; cursor: pointer;
