@@ -57,7 +57,15 @@
     {% if own_site %}
     <div style="margin-top:14px;">
         {% if own_site.is_crawling %}
-        <button type="button" disabled>Обход идёт…</button>
+        <button type="button" disabled>
+            {% if own_site.crawl_pages_total %}
+            Обходим: {{ own_site_crawl_progress }} из {{ own_site.crawl_pages_total }}
+            {% elif own_site_crawl_progress %}
+            Обходим: {{ own_site_crawl_progress }} (ищу список страниц…)
+            {% else %}
+            Обход идёт… (ищу список страниц)
+            {% endif %}
+        </button>
         {% else %}
         <button type="button" id="own-site-crawl-btn" class="secondary-btn">Обойти наш сайт сейчас</button>
         {% endif %}

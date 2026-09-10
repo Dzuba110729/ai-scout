@@ -6,6 +6,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import urldefrag, urljoin, urlparse
 from xml.etree import ElementTree
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_PAGES = 200
 _SITEMAP_NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+
+# Черновик уже загруженных страниц (см. app.models.PageFetchCache) — необязательные
+# хуки, чтобы этот модуль по-прежнему не знал о базе данных напрямую (её открывает
+# и закрывает вызывающий код в app/pipeline.py).
+CacheLookup = Callable[[str], Awaitable[tuple[str, str] | None]]  # url -> (title, text) | None
+CacheStore = Callable[[str, str, str], Awaitable[None]]  # url, title, text
+OnUrlsDiscovered = Callable[[int], Awaitable[None]]  # сколько адресов будем обходить
 
 
 class CompetitorBlockedError(Exception):
@@ -180,11 +188,18 @@ async def crawl_competitor(
     base_url: str,
     *,
     max_pages: int = DEFAULT_MAX_PAGES,
+    cache_lookup: CacheLookup | None = None,
+    cache_store: CacheStore | None = None,
+    on_urls_discovered: OnUrlsDiscovered | None = None,
 ) -> CrawlResult:
     """Полный обход одного конкурента: находим URL и рендерим каждую страницу.
 
     Останавливается сразу при первой блокировке (CompetitorBlockedError) —
     без ретраев, как того требует архитектура (см. CLAUDE.md).
+
+    cache_lookup/cache_store дают устойчивость к обрыву обхода (упал сервер, легла
+    база): если страница уже загружалась недавно, берём готовый текст вместо того,
+    чтобы снова идти на сайт конкурента. Без них (по умолчанию) поведение прежнее.
     """
     urls, urls_total = await discover_urls_from_sitemap(base_url, max_pages=max_pages)
     if not urls:
@@ -193,11 +208,21 @@ async def crawl_competitor(
         # обрывается на лимите. Упёрлись в лимит — значит страниц точно больше.
         urls_total = len(urls) + 1 if len(urls) >= max_pages else len(urls)
 
+    if on_urls_discovered:
+        await on_urls_discovered(len(urls))
+
     result = CrawlResult(base_url=base_url, urls_total=urls_total)
     for url in urls:
-        title, text = await fetch_page_text(context, url)
+        cached = await cache_lookup(url) if cache_lookup else None
+        if cached is not None:
+            title, text = cached
+        else:
+            title, text = await fetch_page_text(context, url)
+            if cache_store:
+                await cache_store(url, title, text)
+            await asyncio.sleep(settings.crawl_request_delay_seconds)
+
         result.pages[url] = text
         result.page_titles[url] = title
-        await asyncio.sleep(settings.crawl_request_delay_seconds)
 
     return result

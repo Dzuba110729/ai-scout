@@ -14,6 +14,13 @@
     <span class="badge badge-own">наш сайт</span>
     {% if own_site %}
     <strong style="margin-left:6px;">{{ own_site.base_url }}</strong>
+    {% if own_site.is_crawling %}
+    <span class="badge" style="background:#fff8e1;color:#b28704;">
+        ⏳ {% if own_site.crawl_pages_total %}{{ crawl_progress.get(own_site.id, 0) }} из {{ own_site.crawl_pages_total }}
+        {% elif crawl_progress.get(own_site.id) %}{{ crawl_progress.get(own_site.id) }} обошли…
+        {% else %}идёт обход{% endif %}
+    </span>
+    {% endif %}
     <div class="muted">Конкурентом не считается: с ним сравниваются находки, чтобы было видно,
         есть ли такое же у нас. <a class="link" href="/settings">Настроить или обойти →</a></div>
     {% else %}
@@ -51,7 +58,13 @@
                         {% else %}на паузе{% endif %}
                     </span>
                     {% if c.is_paused %}<br><span class="badge badge-paused" style="margin-top:4px;">пауза</span>{% endif %}
-                    {% if c.is_crawling %}<br><span class="badge" style="background:#fff8e1;color:#b28704; margin-top:4px;">⏳ идёт обход</span>{% endif %}
+                    {% if c.is_crawling %}
+                    <br><span class="badge" style="background:#fff8e1;color:#b28704; margin-top:4px;">
+                        ⏳ {% if c.crawl_pages_total %}{{ crawl_progress.get(c.id, 0) }} из {{ c.crawl_pages_total }}
+                        {% elif crawl_progress.get(c.id) %}{{ crawl_progress.get(c.id) }} обошли…
+                        {% else %}идёт обход{% endif %}
+                    </span>
+                    {% endif %}
                 </td>
                 <td class="muted">{{ c.last_crawl_finished_at.strftime("%d.%m.%Y %H:%M") if c.last_crawl_finished_at else "ещё не было" }}</td>
                 <td class="muted">
@@ -166,7 +179,7 @@ updateCountdowns();
 setInterval(updateCountdowns, 30000);
 
 {% set any_crawling = competitors|selectattr("is_crawling")|list %}
-{% if any_crawling %}
+{% if any_crawling or (own_site and own_site.is_crawling) %}
 setTimeout(() => location.reload(), 5000);
 {% endif %}
 

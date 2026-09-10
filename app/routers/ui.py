@@ -11,7 +11,7 @@ from app.auth import require_basic_auth
 from app.config import BASE_DIR
 from app.db import get_db
 from app.diff_view import build_side_by_side
-from app.models import ChangeType, Competitor, Page, PageChange, SessionStatus
+from app.models import ChangeType, Competitor, Page, PageChange, PageFetchCache, SessionStatus
 from app.own_site import get_own_site
 from app.scheduler import get_schedule_config
 
@@ -23,6 +23,22 @@ PAGE_SIZE = 25
 # Наш собственный сайт лежит в той же таблице, что и конкуренты (см. app/own_site.py),
 # но его изменения — не новости о рынке, поэтому во все ленты и счётчики он не идёт.
 _ONLY_COMPETITORS = Competitor.is_own.is_(False)
+
+
+def _crawl_progress_counts(db: Session, competitor_ids: list[int]) -> dict[int, int]:
+    """Сколько страниц уже обошли в текущем обходе — по черновику PageFetchCache.
+
+    Одним запросом на все переданные конкуренты, а не по одному — при обходе
+    сразу нескольких это была бы лишняя нагрузка на каждый показ страницы.
+    """
+    if not competitor_ids:
+        return {}
+    rows = db.execute(
+        select(PageFetchCache.competitor_id, func.count(PageFetchCache.id))
+        .where(PageFetchCache.competitor_id.in_(competitor_ids))
+        .group_by(PageFetchCache.competitor_id)
+    ).all()
+    return dict(rows)
 
 
 def _changes_query():
@@ -126,13 +142,19 @@ def competitors_page(request: Request, db: Session = Depends(get_db)):
     competitors = (
         db.query(Competitor).filter(_ONLY_COMPETITORS).order_by(Competitor.created_at.desc()).all()
     )
+    own_site = get_own_site(db)
+
+    progress_ids = [c.id for c in competitors] + ([own_site.id] if own_site else [])
+    crawl_progress = _crawl_progress_counts(db, progress_ids)
+
     return templates.TemplateResponse(
         request,
         "competitors.html",
         {
             "active_nav": "competitors",
             "competitors": competitors,
-            "own_site": get_own_site(db),
+            "own_site": own_site,
+            "crawl_progress": crawl_progress,
         },
     )
 
@@ -249,12 +271,14 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
     own_site = get_own_site(db)
 
     own_site_pages_count = 0
+    own_site_crawl_progress = 0
     if own_site:
         own_site_pages_count = db.scalar(
             select(func.count(Page.id)).where(
                 Page.competitor_id == own_site.id, Page.is_removed.is_(False)
             )
         ) or 0
+        own_site_crawl_progress = _crawl_progress_counts(db, [own_site.id]).get(own_site.id, 0)
 
     return templates.TemplateResponse(
         request,
@@ -264,5 +288,6 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
             "schedule": schedule,
             "own_site": own_site,
             "own_site_pages_count": own_site_pages_count,
+            "own_site_crawl_progress": own_site_crawl_progress,
         },
     )

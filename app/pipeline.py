@@ -10,7 +10,7 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from playwright.async_api import async_playwright
 from sqlalchemy.orm import Session
@@ -26,7 +26,14 @@ from app.ai.compare import ComparisonResult, OwnSite, compare_with_own_site
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import launch_browser, new_stealth_context, storage_state_path_for
-from app.crawler.crawl import CompetitorBlockedError, CrawlResult, crawl_competitor
+from app.crawler.crawl import (
+    CacheLookup,
+    CacheStore,
+    CompetitorBlockedError,
+    CrawlResult,
+    OnUrlsDiscovered,
+    crawl_competitor,
+)
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
 from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError, build_row
@@ -41,6 +48,7 @@ from app.models import (
     OwnSiteComparison,
     Page,
     PageChange,
+    PageFetchCache,
     PageSnapshot,
     SessionStatus,
 )
@@ -137,10 +145,96 @@ async def _notify_progress(notifier: TelegramNotifier, db: Session, competitor: 
     await _notify(notifier, db, competitor, text, page_change_id=None)
 
 
-async def _crawl_competitor(competitor: Competitor) -> CrawlResult:
+def _fetch_cache_lookup(db: Session, competitor_id: int) -> CacheLookup:
+    """Черновик страницы, загруженной не позже CRAWL_RESUME_MAX_AGE_HOURS назад.
+
+    Нужен на случай обрыва обхода (упал сервер, легла база): следующий запуск не
+    должен заново идти на сайт конкурента за страницами, которые уже недавно получил.
+    """
+    max_age = timedelta(hours=settings.crawl_resume_max_age_hours)
+
+    async def lookup(url: str) -> tuple[str, str] | None:
+        def _run() -> tuple[str, str] | None:
+            row = (
+                db.query(PageFetchCache)
+                .filter(PageFetchCache.competitor_id == competitor_id, PageFetchCache.url == url)
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            fetched_at = row.fetched_at if row.fetched_at.tzinfo else row.fetched_at.replace(tzinfo=UTC)
+            if datetime.now(UTC) - fetched_at >= max_age:
+                return None
+            return row.title or "", row.text_content
+
+        return await asyncio.to_thread(_run)
+
+    return lookup
+
+
+def _fetch_cache_store(db: Session, competitor_id: int) -> CacheStore:
+    async def store(url: str, title: str, text: str) -> None:
+        def _run() -> None:
+            existing = (
+                db.query(PageFetchCache)
+                .filter(PageFetchCache.competitor_id == competitor_id, PageFetchCache.url == url)
+                .one_or_none()
+            )
+            if existing is not None:
+                existing.title = title
+                existing.text_content = text
+                existing.fetched_at = datetime.now(UTC)
+            else:
+                db.add(
+                    PageFetchCache(
+                        competitor_id=competitor_id, url=url, title=title, text_content=text
+                    )
+                )
+            db.commit()
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception:
+            db.rollback()
+            logger.exception("Не удалось сохранить черновик страницы %s", url)
+
+    return store
+
+
+def _on_urls_discovered(db: Session, competitor_id: int) -> OnUrlsDiscovered:
+    async def on_discovered(total: int) -> None:
+        def _run() -> None:
+            competitor = db.get(Competitor, competitor_id)
+            if competitor is not None:
+                competitor.crawl_pages_total = total
+                db.add(competitor)
+                db.commit()
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception:
+            db.rollback()
+            logger.exception("Не удалось сохранить общее число страниц конкурента %s", competitor_id)
+
+    return on_discovered
+
+
+def _clear_fetch_cache(db: Session, competitor_id: int) -> None:
+    """Черновик страниц нужен только для незавершённого обхода. После успеха
+    он не нужен — а если оставить, следующий недельный обход мог бы принять
+    старый черновик за свежие данные и пропустить настоящие изменения."""
+    db.query(PageFetchCache).filter(PageFetchCache.competitor_id == competitor_id).delete()
+    db.query(Competitor).filter(Competitor.id == competitor_id).update({"crawl_pages_total": None})
+
+
+async def _crawl_competitor(db: Session, competitor: Competitor) -> CrawlResult:
     """Сначала локальный Playwright (с сохранённой сессией, если она есть, иначе с чистым
     контекстом — этого достаточно для слабо защищённых сайтов), и только если он упёрся
-    в блокировку — Apify Cloud как платный фолбэк (см. CLAUDE.md)."""
+    в блокировку — Apify Cloud как платный фолбэк (см. CLAUDE.md).
+
+    Черновик уже загруженных страниц (PageFetchCache) работает только для локального
+    Playwright — у Apify весь сайт приходит одним ответом, догружать по одной странице
+    там нечего."""
     storage_state_path = storage_state_path_for(competitor.id, STORAGE_STATE_DIR)
     has_session = storage_state_path.exists()
 
@@ -152,14 +246,21 @@ async def _crawl_competitor(competitor: Competitor) -> CrawlResult:
                 browser, storage_state_path=storage_state_path if has_session else None
             ) as context,
         ):
-            return await crawl_competitor(context, competitor.base_url, max_pages=settings.crawl_max_pages)
+            return await crawl_competitor(
+                context,
+                competitor.base_url,
+                max_pages=settings.crawl_max_pages,
+                cache_lookup=_fetch_cache_lookup(db, competitor.id),
+                cache_store=_fetch_cache_store(db, competitor.id),
+                on_urls_discovered=_on_urls_discovered(db, competitor.id),
+            )
     except CompetitorBlockedError:
         if not settings.apify_api_token:
             raise
         logger.info(
             "Локальный Playwright заблокирован у конкурента %s — пробуем Apify Cloud", competitor.name
         )
-        return await crawl_competitor_via_apify(competitor.base_url)
+        return await crawl_competitor_via_apify(competitor.base_url, max_pages=settings.crawl_max_pages)
 
 
 async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
@@ -179,7 +280,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
     # исключение где-то в diff/ИИ/отчёте оставит конкурента навсегда в статусе
     # "обход идёт" и заблокирует все следующие запуски (см. is_crawling).
     try:
-        crawl_result = await _crawl_competitor(competitor)
+        crawl_result = await _crawl_competitor(db, competitor)
 
         # Тяжёлая выборка: тянет тексты всех страниц конкурента (мегабайты) —
         # синхронный SQLAlchemy на такой запросе держит event loop заметно долго.
@@ -249,6 +350,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
 
         competitor.last_crawl_finished_at = now
         db.add(competitor)
+        _clear_fetch_cache(db, competitor.id)
         await asyncio.to_thread(db.commit)
 
         message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
@@ -273,7 +375,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         db.commit()
         logger.warning("Обход конкурента %s не удался: %s", competitor.name, exc)
 
-    except Exception as exc:  # noqa: BLE001 — гарантируем закрытие "обход идёт" при любой ошибке
+    except Exception as exc:
         db.rollback()
         competitor.last_crawl_finished_at = datetime.now(UTC)
         db.add(competitor)

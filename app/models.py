@@ -77,6 +77,12 @@ class Competitor(Base):
     next_crawl_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # Сколько страниц нашли всего в текущем обходе (известно сразу после того, как
+    # прочитана карта сайта, ещё до начала загрузки самих страниц). null — обход
+    # не идёт или страницы ещё ищутся. Число уже обойдённых страниц отдельно не
+    # хранится — это просто количество строк в PageFetchCache для конкурента.
+    crawl_pages_total: Mapped[int | None] = mapped_column(nullable=True)
+
     pages: Mapped[list["Page"]] = relationship(back_populates="competitor", cascade="all, delete-orphan")
 
     @property
@@ -235,3 +241,28 @@ class NotificationLog(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     page_change: Mapped["PageChange | None"] = relationship(back_populates="notifications")
+
+
+class PageFetchCache(Base):
+    """Черновик уже загруженных за текущий обход страниц — не часть истории изменений.
+
+    Пишется сразу при загрузке каждой страницы (пока PageSnapshot появляется только
+    в самом конце, после diff по всему сайту разом). Даёт две вещи: видно, сколько
+    страниц уже обойдено (это просто количество строк здесь), и при обрыве обхода
+    (упал сервер, легла база) следующий запуск не грузит с сайта заново страницы,
+    которые уже недавно получили — см. app.crawler.crawl.crawl_competitor(cache_lookup=...).
+
+    После УСПЕШНОГО завершения обхода строки для этого конкурента удаляются —
+    иначе следующий недельный обход мог бы пропустить настоящие новые изменения,
+    приняв старый черновик за свежие данные.
+    """
+
+    __tablename__ = "page_fetch_cache"
+    __table_args__ = (UniqueConstraint("competitor_id", "url", name="uq_page_fetch_cache_competitor_url"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    url: Mapped[str] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    text_content: Mapped[str] = mapped_column(Text)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
