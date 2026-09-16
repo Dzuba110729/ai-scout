@@ -32,6 +32,7 @@ from app.crawler.crawl import (
     CompetitorBlockedError,
     CrawlResult,
     OnUrlsDiscovered,
+    PreviousPageInfo,
     crawl_competitor,
 )
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
@@ -227,16 +228,37 @@ def _clear_fetch_cache(db: Session, competitor_id: int) -> None:
     db.query(Competitor).filter(Competitor.id == competitor_id).update({"crawl_pages_total": None})
 
 
-async def _crawl_competitor(db: Session, competitor: Competitor) -> CrawlResult:
+def _needs_full_crawl(competitor: Competitor) -> bool:
+    """Первый обход конкурента (нет даты последнего полного обхода) или пора сделать
+    очередную периодическую полную сверку — на случай сайтов, которые не обновляют
+    дату в карте сайта честно, и инкрементальный обход по ней тихо пропускал бы
+    настоящие изменения. См. CLAUDE.md про инкрементальный обход по sitemap lastmod."""
+    if competitor.last_full_crawl_at is None:
+        return True
+    last = competitor.last_full_crawl_at
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return datetime.now(UTC) - last >= timedelta(days=settings.crawl_full_recheck_days)
+
+
+async def _crawl_competitor(
+    db: Session,
+    competitor: Competitor,
+    previous_pages: dict[str, PreviousPageInfo],
+    force_full: bool,
+) -> CrawlResult:
     """Сначала локальный Playwright (с сохранённой сессией, если она есть, иначе с чистым
     контекстом — этого достаточно для слабо защищённых сайтов), и только если он упёрся
     в блокировку — Apify Cloud как платный фолбэк (см. CLAUDE.md).
 
     Черновик уже загруженных страниц (PageFetchCache) работает только для локального
     Playwright — у Apify весь сайт приходит одним ответом, догружать по одной странице
-    там нечего."""
+    там нечего. У Apify также нет инкрементального обхода: актор всегда обходит сайт
+    заново целиком — известное ограничение, обход через него просто не даёт экономии.
+    """
     storage_state_path = storage_state_path_for(competitor.id, STORAGE_STATE_DIR)
     has_session = storage_state_path.exists()
+    max_pages = settings.crawl_full_crawl_max_pages if force_full else settings.crawl_max_pages
 
     try:
         async with (
@@ -249,7 +271,9 @@ async def _crawl_competitor(db: Session, competitor: Competitor) -> CrawlResult:
             return await crawl_competitor(
                 context,
                 competitor.base_url,
-                max_pages=settings.crawl_max_pages,
+                max_pages=max_pages,
+                previous_pages=previous_pages,
+                force_full=force_full,
                 cache_lookup=_fetch_cache_lookup(db, competitor.id),
                 cache_store=_fetch_cache_store(db, competitor.id),
                 on_urls_discovered=_on_urls_discovered(db, competitor.id),
@@ -260,7 +284,7 @@ async def _crawl_competitor(db: Session, competitor: Competitor) -> CrawlResult:
         logger.info(
             "Локальный Playwright заблокирован у конкурента %s — пробуем Apify Cloud", competitor.name
         )
-        return await crawl_competitor_via_apify(competitor.base_url, max_pages=settings.crawl_max_pages)
+        return await crawl_competitor_via_apify(competitor.base_url, max_pages=max_pages)
 
 
 async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
@@ -280,12 +304,18 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
     # исключение где-то в diff/ИИ/отчёте оставит конкурента навсегда в статусе
     # "обход идёт" и заблокирует все следующие запуски (см. is_crawling).
     try:
-        crawl_result = await _crawl_competitor(db, competitor)
-
         # Тяжёлая выборка: тянет тексты всех страниц конкурента (мегабайты) —
         # синхронный SQLAlchemy на такой запросе держит event loop заметно долго.
+        # Нужна ДО обхода: по сохранённой дате из sitemap решаем, что реально грузить.
         previous_by_url = await asyncio.to_thread(_latest_snapshots_by_url, db, competitor.id)
         previous_texts = {url: text for url, (_page, text) in previous_by_url.items()}
+        previous_pages = {
+            url: PreviousPageInfo(text=text, lastmod=page.sitemap_lastmod)
+            for url, (page, text) in previous_by_url.items()
+        }
+        force_full = _needs_full_crawl(competitor)
+
+        crawl_result = await _crawl_competitor(db, competitor, previous_pages, force_full)
 
         diffs = diff_crawl(previous_texts, crawl_result.pages)
         run_at = datetime.now(UTC)
@@ -311,7 +341,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         # параллельных операций разом.
         prepared: list[tuple[PageDiff, Page, PageChange, str | None]] = []
         for page_diff in diffs:
-            page = _apply_page_diff(db, competitor, page_diff, previous_by_url)
+            page = _apply_page_diff(db, competitor, page_diff, previous_by_url, crawl_result.sitemap_lastmod)
             check = checks.get(page_diff.url)
             moved = check.final_url if check and check.reason is DisappearReason.MOVED else None
             if moved:
@@ -378,6 +408,8 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             report_url = await _write_run_report(db, competitor, run_at, report_rows, notes)
 
         competitor.last_crawl_finished_at = now
+        if force_full:
+            competitor.last_full_crawl_at = now
         db.add(competitor)
         _clear_fetch_cache(db, competitor.id)
         await asyncio.to_thread(db.commit)
@@ -481,6 +513,12 @@ def build_run_notes(crawl_result: CrawlResult, checks: dict[str, MissingPageChec
             "Чтобы видеть больше, увеличьте лимит страниц в настройках."
         )
 
+    if crawl_result.failed_urls:
+        notes.append(
+            f"Не удалось загрузить страниц (таймаут или обрыв сети): {len(crawl_result.failed_urls)}. "
+            "Попробуем ещё раз в следующем обходе."
+        )
+
     moved = sum(1 for c in checks.values() if c.reason is DisappearReason.MOVED)
     if moved:
         notes.append(f"Страниц переехало на новый адрес: {moved}.")
@@ -566,9 +604,15 @@ def _apply_page_diff(
     competitor: Competitor,
     page_diff: PageDiff,
     previous_by_url: dict[str, tuple[Page, str]],
+    sitemap_lastmod: dict[str, datetime | None],
 ) -> Page:
     if page_diff.url in previous_by_url:
-        return previous_by_url[page_diff.url][0]
+        page = previous_by_url[page_diff.url][0]
+        if page_diff.change_type is ChangeType.CHANGED:
+            # Страницу правда перезагрузили (иначе бы не было diff) — обновляем
+            # сохранённую дату, чтобы следующий обход снова мог её пропустить.
+            page.sitemap_lastmod = sitemap_lastmod.get(page_diff.url)
+        return page
 
     # Страница может уже быть в БД, но помеченной удалённой (например, ложно —
     # старой логикой). Создать вторую запись с тем же url нельзя: на паре
@@ -583,6 +627,7 @@ def _apply_page_diff(
     else:
         page = Page(competitor_id=competitor.id, url=page_diff.url)
         db.add(page)
+    page.sitemap_lastmod = sitemap_lastmod.get(page_diff.url)
     db.flush()
 
     previous_by_url[page_diff.url] = (page, "")

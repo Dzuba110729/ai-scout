@@ -8,14 +8,14 @@
 import pytest
 
 from app.crawler import crawl as crawl_module
-from app.crawler.crawl import crawl_competitor
+from app.crawler.crawl import SitemapEntry, crawl_competitor
 
 
-def _patch_discovery(monkeypatch, urls: list[str], total: int) -> None:
-    async def fake_discover(base_url, *, max_pages):
-        return urls, total
+def _patch_discovery(monkeypatch, urls: list[str]) -> None:
+    async def fake_discover(base_url):
+        return [SitemapEntry(url=u, lastmod=None) for u in urls]
 
-    monkeypatch.setattr(crawl_module, "discover_urls_from_sitemap", fake_discover)
+    monkeypatch.setattr(crawl_module, "discover_sitemap_entries", fake_discover)
 
 
 def _no_delay(monkeypatch) -> None:
@@ -24,7 +24,7 @@ def _no_delay(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_fresh_cache_hit_skips_network_fetch(monkeypatch):
-    _patch_discovery(monkeypatch, ["https://x.ru/a"], 1)
+    _patch_discovery(monkeypatch, ["https://x.ru/a"])
 
     fetch_calls = []
 
@@ -46,7 +46,7 @@ async def test_fresh_cache_hit_skips_network_fetch(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_missing_cache_entry_fetches_and_stores(monkeypatch):
-    _patch_discovery(monkeypatch, ["https://x.ru/a"], 1)
+    _patch_discovery(monkeypatch, ["https://x.ru/a"])
     _no_delay(monkeypatch)
 
     async def fake_fetch(context, url):
@@ -75,7 +75,7 @@ async def test_missing_cache_entry_fetches_and_stores(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_urls_discovered_reported_before_any_page_is_fetched(monkeypatch):
-    _patch_discovery(monkeypatch, ["https://x.ru/a", "https://x.ru/b"], 2)
+    _patch_discovery(monkeypatch, ["https://x.ru/a", "https://x.ru/b"])
     _no_delay(monkeypatch)
 
     fetch_order = []
@@ -99,7 +99,7 @@ async def test_urls_discovered_reported_before_any_page_is_fetched(monkeypatch):
 @pytest.mark.asyncio
 async def test_without_cache_hooks_behaves_as_before(monkeypatch):
     """Без хуков (обычный вызов из pipeline при первом запуске) поведение не меняется."""
-    _patch_discovery(monkeypatch, ["https://x.ru/a"], 1)
+    _patch_discovery(monkeypatch, ["https://x.ru/a"])
     _no_delay(monkeypatch)
 
     async def fake_fetch(context, url):

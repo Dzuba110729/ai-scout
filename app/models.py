@@ -83,6 +83,11 @@ class Competitor(Base):
     # хранится — это просто количество строк в PageFetchCache для конкурента.
     crawl_pages_total: Mapped[int | None] = mapped_column(nullable=True)
 
+    # Когда в последний раз обошли ВСЕ страницы сайта, а не только изменившиеся по
+    # дате из карты сайта. null — обхода ещё не было, следующий обход обязан быть
+    # полным. См. app.pipeline._needs_full_crawl и CLAUDE.md про инкрементальный обход.
+    last_full_crawl_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     pages: Mapped[list["Page"]] = relationship(back_populates="competitor", cascade="all, delete-orphan")
 
     @property
@@ -116,6 +121,10 @@ class Page(Base):
     redirect_to_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     redirect_target_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Дата обновления этой страницы по данным sitemap на момент последней реальной
+    # загрузки. null — сайт не сообщает дату, или страницу ещё ни разу не грузили
+    # после появления этого поля. См. app.crawler.crawl.plan_crawl.
+    sitemap_lastmod: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     competitor: Mapped["Competitor"] = relationship(back_populates="pages")
     snapshots: Mapped[list["PageSnapshot"]] = relationship(

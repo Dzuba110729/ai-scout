@@ -133,6 +133,19 @@ def test_notes_warn_when_site_is_bigger_than_the_page_limit():
     assert any("500" in note and "не весь сайт" in note for note in notes)
 
 
+def test_notes_warn_about_pages_that_failed_to_load():
+    crawl_result = CrawlResult(
+        base_url="https://x.ru",
+        pages={"https://x.ru/a": "т"},
+        urls_total=2,
+        failed_urls=["https://x.ru/broken"],
+    )
+
+    notes = build_run_notes(crawl_result, {})
+
+    assert any("Не удалось загрузить страниц" in note and "1" in note for note in notes)
+
+
 def test_notes_silent_when_whole_site_fits():
     crawl_result = CrawlResult(
         base_url="https://x.ru", pages={"https://x.ru/a": "т", "https://x.ru/b": "т"}, urls_total=2
