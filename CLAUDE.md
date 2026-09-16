@@ -65,7 +65,11 @@
       статус сессии
 - [ ] UI на Jinja2: список конкурентов со статусом сессии, лента изменений,
       карточка "было/стало"
-- [ ] Telegram-уведомления: new/removed страница, значимый changed-дифф, блокировка обхода
+- [x] Telegram-уведомления: new/removed страница, значимый changed-дифф, блокировка обхода
+- [x] Telegram-бот с интерактивным меню (2026-09-16, `app/telegram_bot.py`, aiogram,
+      long polling): список конкурентов, добавление, обход одного/всех/своего сайта,
+      остановка, пауза/снятие с паузы, удаление — тот же функционал, что в вебе.
+      Доступ по allowlist chat_id (`TELEGRAM_BOT_ALLOWED_CHAT_IDS` в `.env`)
 - [ ] Тесты: diff-детекция на фикстурах, парсинг ответа ИИ, обработка 403/challenge-стаба,
       сериализация/восстановление `storage_state`
 - [ ] Деплой: Docker Compose (FastAPI + Postgres), Basic Auth, инструкция по локальному
@@ -81,7 +85,8 @@
 - Планировщик: APScheduler
 - ИИ-анализ: Claude Code CLI headless (`claude -p`), подписка — без Anthropic API
 - UI: Jinja2 (server-rendered), без отдельного SPA-фронтенда
-- Уведомления: Telegram Bot API, прямая интеграция в коде (без MCP/плагинов)
+- Уведомления и управление: Telegram Bot API, прямая интеграция в коде (без MCP/плагинов) —
+  и исходящие уведомления, и интерактивное меню (aiogram, long polling)
 - Деплой: Docker Compose, Basic Auth
 
 ## Скиллы для этого проекта

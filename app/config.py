@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Кому разрешено пользоваться интерактивным меню бота (список конкурентов,
+    # запуск обхода и т.д.) — через запятую, в дополнение к telegram_chat_id.
+    # Пусто — доступ только у telegram_chat_id.
+    telegram_bot_allowed_chat_ids: str = ""
+
     claude_cli_path: str = "claude"
     claude_cli_timeout_seconds: int = 120
 
@@ -70,6 +75,12 @@ class Settings(BaseSettings):
     own_site_compare_text_limit: int = 3000
 
     log_level: str = "INFO"
+
+    def telegram_allowed_chat_ids(self) -> set[str]:
+        ids = {cid.strip() for cid in self.telegram_bot_allowed_chat_ids.split(",") if cid.strip()}
+        if self.telegram_chat_id:
+            ids.add(str(self.telegram_chat_id).strip())
+        return ids
 
 
 settings = Settings()

@@ -1,17 +1,11 @@
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app import crawl_manager
+from app import competitor_ops, crawl_manager
 from app.auth import require_basic_auth
 from app.db import get_db
-from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError
-from app.models import Competitor, SessionStatus
-from app.scheduler import get_schedule_config, schedule_competitor_and_save_next_run, unschedule_competitor
+from app.models import Competitor
 from app.schemas import CompetitorCreate, CompetitorOut, CrawlAllOut
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/competitors", tags=["competitors"], dependencies=[Depends(require_basic_auth)])
 
@@ -30,30 +24,7 @@ def list_competitors(db: Session = Depends(get_db)):
 
 @router.post("", response_model=CompetitorOut, status_code=201)
 def create_competitor(payload: CompetitorCreate, db: Session = Depends(get_db)):
-    competitor = Competitor(
-        name=payload.name,
-        base_url=payload.base_url,
-        status=SessionStatus.NEEDS_SESSION,
-    )
-
-    docs = GoogleDocsClient()
-    if docs.is_configured:
-        try:
-            folder_id, folder_url = docs.get_or_create_competitor_folder(payload.name)
-            competitor.google_drive_folder_id = folder_id
-            competitor.google_drive_folder_url = folder_url
-        except GoogleDocsError:
-            logger.exception("Не удалось создать папку Google Drive для конкурента %s", payload.name)
-
-    db.add(competitor)
-    db.commit()
-    db.refresh(competitor)
-
-    config = get_schedule_config(db)
-    schedule_competitor_and_save_next_run(db, competitor, config)
-    db.refresh(competitor)
-
-    return competitor
+    return competitor_ops.create_competitor(db, payload.name, payload.base_url)
 
 
 @router.post("/crawl-all", status_code=202, response_model=CrawlAllOut)
@@ -75,31 +46,21 @@ async def trigger_crawl_all(db: Session = Depends(get_db)):
 @router.post("/{competitor_id}/pause", response_model=CompetitorOut)
 def pause_competitor(competitor_id: int, db: Session = Depends(get_db)):
     competitor = _get_or_404(db, competitor_id)
-    competitor.is_paused = True
-    db.commit()
-    db.refresh(competitor)
-    unschedule_competitor(competitor.id)
+    competitor_ops.pause_competitor(db, competitor)
     return competitor
 
 
 @router.post("/{competitor_id}/resume", response_model=CompetitorOut)
 def resume_competitor(competitor_id: int, db: Session = Depends(get_db)):
     competitor = _get_or_404(db, competitor_id)
-    competitor.is_paused = False
-    db.commit()
-    db.refresh(competitor)
-    config = get_schedule_config(db)
-    schedule_competitor_and_save_next_run(db, competitor, config)
-    db.refresh(competitor)
+    competitor_ops.resume_competitor(db, competitor)
     return competitor
 
 
 @router.delete("/{competitor_id}", status_code=204)
 def delete_competitor(competitor_id: int, db: Session = Depends(get_db)):
     competitor = _get_or_404(db, competitor_id)
-    unschedule_competitor(competitor.id)
-    db.delete(competitor)
-    db.commit()
+    competitor_ops.delete_competitor(db, competitor)
 
 
 @router.post("/{competitor_id}/crawl", status_code=202)
