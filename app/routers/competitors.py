@@ -115,6 +115,16 @@ async def trigger_crawl(competitor_id: int, db: Session = Depends(get_db)):
     return {"status": "запущен обход", "competitor_id": competitor.id}
 
 
+@router.post("/{competitor_id}/stop", status_code=202)
+async def stop_crawl(competitor_id: int, db: Session = Depends(get_db)):
+    _get_or_404(db, competitor_id)
+
+    if not crawl_manager.stop(competitor_id):
+        raise HTTPException(status_code=409, detail="Обход этого конкурента сейчас не выполняется")
+
+    return {"status": "обход остановлен", "competitor_id": competitor_id}
+
+
 def _get_or_404(db: Session, competitor_id: int) -> Competitor:
     competitor = db.get(Competitor, competitor_id)
     if not competitor:

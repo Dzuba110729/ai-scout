@@ -20,9 +20,20 @@ class Settings(BaseSettings):
     claude_cli_path: str = "claude"
     claude_cli_timeout_seconds: int = 120
 
+    # Сколько вызовов `claude -p` можно держать в работе одновременно за один
+    # обход. Раньше находки анализировались строго по одной — на десятках находок
+    # за прогон это заметно удлиняло обход. Без потолка длинный список находок
+    # запустил бы вызовы все разом.
+    claude_cli_concurrency: int = 3
+
     apify_api_token: str = ""
     apify_actor_id: str = "apify/website-content-crawler"
     apify_run_timeout_seconds: int = 600
+
+    # Без initialConcurrency актор по умолчанию "разгоняется" с 1 запроса в несколько
+    # минут до максимума — на сайте в пару сотен страниц это и давало 15+ минут обхода.
+    # Сразу выставляем полную параллельность.
+    apify_max_concurrency: int = 30
 
     # Способ 1 (личный Google-аккаунт, OAuth) — см. scripts/google_oauth_login.py.
     google_oauth_client_secret_path: str = ""

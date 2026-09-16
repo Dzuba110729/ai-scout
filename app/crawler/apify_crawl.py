@@ -53,6 +53,11 @@ async def crawl_competitor_via_apify(base_url: str, *, max_pages: int = 200) -> 
         "maxCrawlPages": max_pages,
         "crawlerType": "playwright:adaptive",
         "proxyConfiguration": {"useApifyProxy": True},
+        # initialConcurrency = maxConcurrency: без этого актор начинает с 1 запроса
+        # и минутами разгоняется до максимума — на сайте в сотни страниц это была
+        # основная причина долгого обхода (см. CLAUDE.md).
+        "maxConcurrency": settings.apify_max_concurrency,
+        "initialConcurrency": settings.apify_max_concurrency,
     }
 
     run = await actor_client.call(

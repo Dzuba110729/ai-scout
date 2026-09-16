@@ -8,7 +8,7 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-playwright install chromium
+python -m patchright install chromium
 
 cp .env.example .env
 # отредактируйте .env: BASIC_AUTH_*, TELEGRAM_*, APIFY_API_TOKEN, DATABASE_URL

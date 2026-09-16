@@ -52,6 +52,8 @@
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
             {% if competitor.is_crawling %}
             <button type="button" disabled>Обход идёт…</button>
+            <button type="button" class="action-btn danger-btn" data-action="/api/competitors/{{ competitor.id }}/stop"
+                    data-confirm="Остановить обход «{{ competitor.name }}»? Уже собранные страницы сохранятся, недособранные — нет.">Остановить обход</button>
             {% else %}
             <button type="button" class="action-btn" data-action="/api/competitors/{{ competitor.id }}/crawl">Обойти сейчас</button>
             {% endif %}

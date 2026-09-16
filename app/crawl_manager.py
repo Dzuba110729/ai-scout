@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # задачу на полуслове (asyncio держит на неё только слабую ссылку).
 _background_tasks: set[asyncio.Task] = set()
 
+# competitor_id -> его текущая задача обхода (ручная, плановая или через "обойти всех").
+# Нужна для stop() — без неё отменить конкретный обход снаружи нечем.
+_tasks_by_competitor: dict[int, asyncio.Task] = {}
+
 _semaphores: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -86,24 +90,52 @@ def _release_if_still_crawling(db: Session, competitor_id: int) -> None:
 
 
 async def _run_claimed(competitor_id: int) -> None:
-    """Выполняет уже занятый (claim) обход — в своей сессии БД и под общим лимитом."""
-    async with _semaphore():
-        db = SessionLocal()
-        try:
-            competitor = db.get(Competitor, competitor_id)
-            if competitor is not None:
-                await run_crawl_for_competitor(db, competitor)
-        except Exception:  # noqa: BLE001 — фоновая задача: ошибку логируем, наверх нести некуда
-            logger.exception("Обход конкурента %s завершился ошибкой", competitor_id)
-        finally:
-            _release_if_still_crawling(db, competitor_id)
-            db.close()
+    """Выполняет уже занятый (claim) обход — в своей сессии БД и под общим лимитом.
+
+    Регистрирует себя в _tasks_by_competitor независимо от того, кто её запустил
+    (ручная кнопка через _spawn или плановый job через run_now) — так stop()
+    одинаково работает для обоих путей.
+    """
+    task = asyncio.current_task()
+    if task is not None:
+        _tasks_by_competitor[competitor_id] = task
+    try:
+        async with _semaphore():
+            db = SessionLocal()
+            try:
+                competitor = db.get(Competitor, competitor_id)
+                if competitor is not None:
+                    await run_crawl_for_competitor(db, competitor)
+            except asyncio.CancelledError:
+                logger.info("Обход конкурента %s остановлен вручную", competitor_id)
+                raise
+            except Exception:  # фоновая задача: ошибку логируем, наверх нести некуда
+                logger.exception("Обход конкурента %s завершился ошибкой", competitor_id)
+            finally:
+                _release_if_still_crawling(db, competitor_id)
+                db.close()
+    finally:
+        if _tasks_by_competitor.get(competitor_id) is task:
+            del _tasks_by_competitor[competitor_id]
 
 
 def _spawn(competitor_id: int) -> None:
     task = asyncio.get_running_loop().create_task(_run_claimed(competitor_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+def stop(competitor_id: int) -> bool:
+    """Отменяет обход конкурента, если он сейчас выполняется (или ждёт своей очереди
+    на семафоре). False — обхода этого конкурента прямо сейчас нет.
+
+    Отменяет именно нашу задачу, а не процесс сервера — см. CLAUDE.md/память про
+    инцидент с убийством uvicorn ради остановки обхода."""
+    task = _tasks_by_competitor.get(competitor_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
 def start(db: Session, competitor: Competitor) -> bool:

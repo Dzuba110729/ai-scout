@@ -12,7 +12,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from playwright.async_api import async_playwright
+from patchright.async_api import async_playwright
 from sqlalchemy.orm import Session
 
 from app.ai.analyze import (
@@ -306,8 +306,10 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             selected = select_diffs_for_comparison(diffs, settings.own_site_compare_max_per_run)
             compare_urls = {d.url for d in selected}
 
-        report_rows: list[list[str]] = []
-        comparisons: list[tuple[str, ComparisonResult]] = []
+        # Подготовка (быстрая работа с БД) — строго последовательно: page_change.id
+        # нужен ДО вызова ИИ, а один SQLAlchemy Session нельзя дёргать из по-настоящему
+        # параллельных операций разом.
+        prepared: list[tuple[PageDiff, Page, PageChange, str | None]] = []
         for page_diff in diffs:
             page = _apply_page_diff(db, competitor, page_diff, previous_by_url)
             check = checks.get(page_diff.url)
@@ -317,14 +319,41 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
 
             page_change = _record_change(db, page, page_diff)
             db.flush()  # получаем page_change.id до вызова ИИ
+            prepared.append((page_diff, page, page_change, moved))
 
-            analysis = await _analyze_and_store(db, page_change, page_diff)
+        # Сами вызовы ИИ (claude -p, секунды каждый) не трогают БД, пока не получат
+        # ответ — поэтому безопасно гонять их параллельно (до claude_cli_concurrency
+        # разом), а не строго по одному, как раньше. db.add() внутри _analyze_and_store/
+        # _compare_with_own_site_and_store происходит уже после await, синхронно —
+        # это не настоящая параллельная запись в Session.
+        ai_semaphore = asyncio.Semaphore(max(1, settings.claude_cli_concurrency))
 
-            comparison = None
-            if page_diff.url in compare_urls:
-                comparison = await _compare_with_own_site_and_store(db, page_change, page_diff, own_site)
-                if comparison:
-                    comparisons.append((page_diff.url, comparison))
+        async def _limited(coro):
+            async with ai_semaphore:
+                return await coro
+
+        analyses = await asyncio.gather(
+            *(
+                _limited(_analyze_and_store(db, page_change, page_diff))
+                for page_diff, _page, page_change, _moved in prepared
+            )
+        )
+        comparisons_by_item = await asyncio.gather(
+            *(
+                _limited(_compare_with_own_site_and_store(db, page_change, page_diff, own_site))
+                if page_diff.url in compare_urls
+                else _no_comparison()
+                for page_diff, _page, page_change, _moved in prepared
+            )
+        )
+
+        report_rows: list[list[str]] = []
+        comparisons: list[tuple[str, ComparisonResult]] = []
+        for (page_diff, page, _page_change, moved), analysis, comparison in zip(
+            prepared, analyses, comparisons_by_item, strict=True
+        ):
+            if comparison:
+                comparisons.append((page_diff.url, comparison))
 
             report_rows.append(
                 build_row(
@@ -614,6 +643,11 @@ async def _load_own_site_for_comparison(db: Session, competitor: Competitor) -> 
     if competitor.is_own:
         return None  # сам с собой сайт не сравниваем
     return await asyncio.to_thread(load_own_site, db)
+
+
+async def _no_comparison() -> ComparisonResult | None:
+    """Заглушка-корутина для asyncio.gather там, где сравнение с нашим сайтом не нужно."""
+    return None
 
 
 async def _compare_with_own_site_and_store(

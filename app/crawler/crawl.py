@@ -12,7 +12,7 @@ from urllib.parse import urldefrag, urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
-from playwright.async_api import BrowserContext
+from patchright.async_api import BrowserContext
 
 from app.config import settings
 from app.crawler.blocking import blocked_reason, is_blocked

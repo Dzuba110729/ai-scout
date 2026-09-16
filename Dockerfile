@@ -13,6 +13,10 @@ COPY alembic.ini ./
 
 RUN pip install --no-cache-dir -e .
 
+# patchright скачивает свой собственный патченный Chromium (не тот, что уже есть
+# в базовом playwright-образе) — OS-зависимости для headless-браузера у образа уже есть.
+RUN python -m patchright install chromium
+
 EXPOSE 8888
 
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8888"]

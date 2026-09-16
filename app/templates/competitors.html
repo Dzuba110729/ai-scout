@@ -75,6 +75,8 @@
                 <td onclick="event.stopPropagation();">
                     {% if c.is_crawling %}
                     <button type="button" disabled>Обход идёт…</button>
+                    <button type="button" class="action-btn danger-btn" data-action="/api/competitors/{{ c.id }}/stop"
+                            data-confirm="Остановить обход «{{ c.name }}»?">Остановить</button>
                     {% else %}
                     <button type="button" class="action-btn secondary-btn" data-action="/api/competitors/{{ c.id }}/crawl">Обойти сейчас</button>
                     {% endif %}

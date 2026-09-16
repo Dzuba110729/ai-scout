@@ -66,6 +66,7 @@
             Обход идёт… (ищу список страниц)
             {% endif %}
         </button>
+        <button type="button" id="own-site-stop-btn" class="danger-btn">Остановить обход</button>
         {% else %}
         <button type="button" id="own-site-crawl-btn" class="secondary-btn">Обойти наш сайт сейчас</button>
         {% endif %}
@@ -135,6 +136,28 @@ if (ownCrawlBtn) {
         } catch (err) {
             status.textContent = err.message;
             ownCrawlBtn.disabled = false;
+        }
+    });
+}
+
+const ownStopBtn = document.getElementById("own-site-stop-btn");
+if (ownStopBtn) {
+    ownStopBtn.addEventListener("click", async () => {
+        if (!confirm("Остановить обход нашего сайта? Уже собранные страницы сохранятся.")) return;
+        const status = document.getElementById("own-site-crawl-status");
+        ownStopBtn.disabled = true;
+        status.textContent = "Останавливаю…";
+        try {
+            const response = await fetch("/api/own-site/stop", {method: "POST"});
+            if (!response.ok) {
+                const detail = await response.json().catch(() => ({}));
+                throw new Error(detail.detail || `Ошибка ${response.status}`);
+            }
+            status.textContent = "Обход остановлен, страница обновится";
+            setTimeout(() => location.reload(), 1500);
+        } catch (err) {
+            status.textContent = err.message;
+            ownStopBtn.disabled = false;
         }
     });
 }

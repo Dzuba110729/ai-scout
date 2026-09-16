@@ -3,12 +3,18 @@
 storage_state (куки + localStorage) проходится вручную один раз в headed-режиме
 при добавлении конкурента или истечении сессии (см. CLAUDE.md), а затем
 переиспользуется фоновым краулером до тех пор, пока сайт его принимает.
+
+Используется patchright, а не обычный playwright: patchright исполняет служебные
+CDP-команды в изолированном контексте, а не в основном JS-контексте страницы,
+поэтому антибот-скрипты (Qrator и подобные) не видят тот же CDP-фингерпринт
+автоматизации, на котором раньше палился обычный Playwright (см. CLAUDE.md).
+API идентичен playwright.async_api — это drop-in замена.
 """
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from playwright.async_api import Browser, BrowserContext, Playwright, async_playwright
+from patchright.async_api import Browser, BrowserContext, Playwright, async_playwright
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

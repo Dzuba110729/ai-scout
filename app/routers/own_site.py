@@ -69,6 +69,16 @@ async def trigger_own_site_crawl(db: Session = Depends(get_db)):
     return {"status": "запущен обход нашего сайта", "competitor_id": own.id}
 
 
+@router.post("/stop", status_code=202)
+async def stop_own_site_crawl(db: Session = Depends(get_db)):
+    own = _get_or_404(db)
+
+    if not crawl_manager.stop(own.id):
+        raise HTTPException(status_code=409, detail="Обход сейчас не выполняется")
+
+    return {"status": "обход остановлен", "competitor_id": own.id}
+
+
 def _get_or_404(db: Session) -> Competitor:
     own = get_own_site(db)
     if own is None:
