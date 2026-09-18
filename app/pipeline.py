@@ -22,6 +22,7 @@ from app.ai.analyze import (
     parse_ai_response,
     run_claude_cli,
 )
+from app.ai.backfill import backfill_missing_analyses
 from app.ai.compare import ComparisonResult, OwnSite, compare_with_own_site
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
@@ -40,7 +41,6 @@ from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing
 from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError, build_row
 from app.models import (
     AiAnalysis,
-    ChangeType as DbChangeType,
     ComparisonVerdict,
     Competitor,
     DisappearanceReason,
@@ -52,6 +52,9 @@ from app.models import (
     PageFetchCache,
     PageSnapshot,
     SessionStatus,
+)
+from app.models import (
+    ChangeType as DbChangeType,
 )
 from app.notifications.telegram import (
     TelegramNotifier,
@@ -402,6 +405,13 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
 
         notes = build_run_notes(crawl_result, checks)
 
+        # Находки этого и прошлых прогонов, оставшиеся без ИИ-разбора (CLI не ответил).
+        # Инкрементальный обход сам их не пересмотрит — страницы-то не менялись.
+        db.flush()
+        backfilled, attempted = await _backfill_missing_analyses(db, competitor)
+        if attempted:
+            notes.append(_format_backfill_note(backfilled, attempted))
+
         report_url = None
         # Отчёт в Google Docs — это отчёт по конкуренту; по нашему сайту он не нужен.
         if report_rows and not competitor.is_own:
@@ -719,6 +729,27 @@ async def _compare_with_own_site_and_store(
         )
     )
     return comparison
+
+
+async def _backfill_missing_analyses(db: Session, competitor: Competitor) -> tuple[int, int]:
+    limit = settings.ai_backfill_max_per_run
+    if limit <= 0:
+        return 0, 0
+    try:
+        return await backfill_missing_analyses(db, competitor.id, limit=limit)
+    except Exception:  # дозаправка — довесок; её сбой не должен валить сам обход
+        logger.exception("Дозаправка ИИ-анализа для конкурента %s упала", competitor.name)
+        db.rollback()
+        return 0, 0
+
+
+def _format_backfill_note(done: int, attempted: int) -> str:
+    if done == attempted:
+        return f"Дозаправлен ИИ-разбор для находок, оставшихся без него раньше: {done}."
+    return (
+        f"Дозаправлен ИИ-разбор для находок без него: {done} из {attempted}. "
+        f"Остальные {attempted - done} попробуем в следующем обходе."
+    )
 
 
 async def _analyze_and_store(

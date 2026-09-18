@@ -59,32 +59,60 @@
 
 ## План реализации
 
-- [ ] Схема БД (PostgreSQL): `competitors`, `pages`, `page_snapshots`, `page_changes`
-      (new/changed/removed + diff), `ai_analysis` (category, usp, cta), `notifications_log`
-- [ ] Краулер на Playwright со стелс-режимом (маскировка headless, реалистичный UA/viewport,
-      задержки); хранение и переиспользование `storage_state` на конкурента
-- [ ] Flow ручного решения капчи: headed-режим локально при первом добавлении конкурента
-      или истечении сессии, сохранение `storage_state`; в UI — статус "нужна ручная сессия"
-- [ ] Обработка блокировок в фоне: детект 403/challenge-страницы → статус "нужна ручная
-      сессия" + алерт в Telegram, без бесконечных ретраев
-- [ ] Движок диффа по content-hash: new/removed/changed по URL, извлечение изменившегося
-      текстового фрагмента для передачи в ИИ
-- [ ] Модуль ИИ-анализа через Claude Code CLI headless: промпт на извлечение
-      category/usp/cta в JSON, retry при временной недоступности CLI
-- [ ] Планировщик на APScheduler (без Celery/Redis на старте)
-- [ ] FastAPI-бэкенд: CRUD конкурентов, лента изменений/карточек, ручной триггер обхода,
-      статус сессии
-- [ ] UI на Jinja2: список конкурентов со статусом сессии, лента изменений,
-      карточка "было/стало"
+Состояние на 2026-09-18: всё из первоначального плана сделано, проект в рабочем
+режиме (пилот на реальных конкурентах). Ниже — что есть, и отдельно открытые хвосты.
+
+- [x] Схема БД (PostgreSQL): `competitors`, `pages`, `page_snapshots`, `page_changes`
+      (new/changed/removed + diff), `ai_analysis` (category, usp, cta), `notifications_log`,
+      плюс `own_site_comparisons`, `schedule_config`, `page_fetch_cache`.
+      Миграции Alembic — `migrations/versions/0001…0007`
+- [x] Краулер (patchright, см. ограничения выше) со стелс-настройками; хранение и
+      переиспользование `storage_state` на конкурента (`storage_states/competitor_<id>.json`)
+- [x] Flow ручной сессии: экспорт кук из обычного Chrome →
+      `scripts/cookies_to_storage_state.py`; в UI — статус «нужна ручная сессия»
+- [x] Обработка блокировок: детект 403/challenge-страницы (`app/crawler/blocking.py`) →
+      статус `needs_session` + алерт в Telegram, без бесконечных ретраев
+- [x] Движок диффа по content-hash (`app/crawler/diff.py`): new/removed/changed по URL;
+      перепроверка пропавших страниц обычным запросом (`app/crawler/recheck.py`) —
+      404/редирект/жива
+- [x] ИИ-анализ через Claude Code CLI headless (`app/ai/analyze.py`): JSON с
+      category/usp/cta/summary, retry, параллельность `CLAUDE_CLI_CONCURRENCY`.
+      Сравнение находок с нашим сайтом (`app/ai/compare.py`, «есть ли такое у нас»)
+- [x] Дозаправка пропущенного ИИ-анализа (2026-09-18, `app/ai/backfill.py`): в конце
+      каждого обхода добираем находки без разбора с прошлых прогонов (до
+      `AI_BACKFILL_MAX_PER_RUN`), вручную — `scripts/backfill_ai_analysis.py`.
+      Нужна потому, что инкрементальный обход сам пропуски не пересматривает
+- [x] Планировщик APScheduler (`app/scheduler.py`), расписание редактируется в UI и
+      хранится в БД. Единая точка запуска обходов — `app/crawl_manager.py` (защита от
+      двойного запуска, общий лимит `CRAWL_CONCURRENCY`, остановка обхода). При
+      старте сервера призрачные отметки «обход идёт» сбрасываются (2026-09-18)
+- [x] FastAPI-бэкенд: CRUD конкурентов, лента изменений, ручной триггер обхода одного/всех,
+      остановка, пауза, статус сессии, обход собственного сайта
+- [x] UI на Jinja2 в стиле CRM: дашборд, список конкурентов, карточка конкурента с вкладками,
+      лента изменений с фильтрами, карточка «было/стало», настройки расписания
+- [x] Отчёты по каждому обходу — Google Docs/Drive (`app/integrations/google_docs.py`,
+      папка на прогон); OAuth-токен личного аккаунта протухает раз в ~7 дней
+      (приложение в статусе Testing) — переавторизация `scripts/google_oauth_login.py`
 - [x] Telegram-уведомления: new/removed страница, значимый changed-дифф, блокировка обхода
 - [x] Telegram-бот с интерактивным меню (2026-09-16, `app/telegram_bot.py`, aiogram,
       long polling): список конкурентов, добавление, обход одного/всех/своего сайта,
       остановка, пауза/снятие с паузы, удаление — тот же функционал, что в вебе.
       Доступ по allowlist chat_id (`TELEGRAM_BOT_ALLOWED_CHAT_IDS` в `.env`)
-- [ ] Тесты: diff-детекция на фикстурах, парсинг ответа ИИ, обработка 403/challenge-стаба,
-      сериализация/восстановление `storage_state`
-- [ ] Деплой: Docker Compose (FastAPI + Postgres), Basic Auth, инструкция по локальному
-      headed-прогону для капчи и заливке `storage_state` на сервер
+- [x] Тесты (`pytest`, ~200 штук): diff-детекция, парсинг ответа ИИ, 403/challenge,
+      `storage_state`, план инкрементального обхода, crawl_manager, дозаправка ИИ
+- [x] Деплой: Dockerfile + `docker-compose.yml` (FastAPI + Postgres), Basic Auth,
+      инструкция в README
+
+### Открытые хвосты
+
+- **Docker-образ не проверен на реальном сервере.** Пока всё работает локально
+  (`uvicorn` + Postgres в докере). В compose `~/.claude` монтируется только для
+  чтения, а `claude` CLI пишет в эту папку — есть риск, что ИИ-анализ в контейнере
+  не заведётся. Проверить перед деплоем.
+- **Apify-фолбэк не умеет инкрементальный обход** — каждый раз обходит сайт целиком.
+- **Patchright не проверен на foxford.ru** (см. ограничения выше).
+- Линтер (`ruff check`) даёт ~20 замечаний B008 в роутерах (стиль `Depends` в
+  аргументах по умолчанию) — не баг, можно отключить правило в `pyproject.toml`.
 
 ## Технический стек
 

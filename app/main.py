@@ -5,7 +5,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app import crawl_manager
 from app.config import settings
+from app.db import SessionLocal
 from app.routers import changes, competitors, own_site, schedule, ui
 from app.scheduler import start_scheduler
 from app.telegram_bot import create_bot, create_dispatcher
@@ -17,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Обходы, оборванные прошлым запуском сервера, иначе навсегда блокируют новые.
+    db = SessionLocal()
+    try:
+        crawl_manager.release_stale_crawls(db)
+    finally:
+        db.close()
+
     start_scheduler()
 
     bot = None

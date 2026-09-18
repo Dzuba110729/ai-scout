@@ -233,3 +233,29 @@ async def test_run_now_skips_paused_competitor(monkeypatch):
 
     assert await crawl_manager.run_now(session, competitor) is False
     assert competitor.is_crawling is False
+
+
+# --- сброс призрачных отметок при старте сервера ---
+
+
+def test_release_stale_crawls_clears_flags_left_by_killed_server():
+    stuck = _competitor(1)
+    stuck.last_crawl_started_at = crawl_manager.datetime(2026, 9, 16, 12, 0, tzinfo=crawl_manager.UTC)
+    stuck.last_crawl_finished_at = None
+    idle = _competitor(2)
+    session = _FakeSession([stuck, idle])
+
+    released = crawl_manager.release_stale_crawls(session)
+
+    assert released == 1
+    assert not stuck.is_crawling
+    assert session.commits == 1
+    # После сброса конкурента можно снова занять под обход
+    assert crawl_manager.claim(session, stuck)
+
+
+def test_release_stale_crawls_is_noop_when_nothing_is_stuck():
+    session = _FakeSession([_competitor(1), _competitor(2)])
+
+    assert crawl_manager.release_stale_crawls(session) == 0
+    assert session.commits == 0

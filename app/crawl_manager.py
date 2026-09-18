@@ -85,8 +85,34 @@ def _release_if_still_crawling(db: Session, competitor_id: int) -> None:
             competitor.last_crawl_finished_at = datetime.now(UTC)
             db.add(competitor)
             db.commit()
-    except Exception:  # noqa: BLE001 — это последний рубеж, дальше отметку снять уже некому
+    except Exception:
         logger.exception("Не удалось снять отметку «обход идёт» с конкурента %s", competitor_id)
+
+
+def release_stale_crawls(db: Session) -> int:
+    """Снимает отметку «обход идёт» со всех конкурентов при старте сервера.
+
+    Отметка живёт в БД, а сам обход — asyncio-задача в памяти процесса. Если
+    сервер убили (SIGKILL, падение, деплой) посреди обхода, finally в _run_claimed
+    не срабатывает, и конкурент навсегда остаётся «в обходе»: кнопка и планировщик
+    отбивают все следующие запуски как дубли. При старте процесса живых обходов
+    быть не может по определению — значит, любая такая отметка призрачная.
+
+    Возвращает число сброшенных конкурентов.
+    """
+    stuck = [c for c in db.query(Competitor).all() if c.is_crawling]
+    if not stuck:
+        return 0
+    now = datetime.now(UTC)
+    for competitor in stuck:
+        competitor.last_crawl_finished_at = now
+        db.add(competitor)
+        logger.warning(
+            "Снята призрачная отметка «обход идёт» с конкурента %s (обход оборван прошлым запуском сервера)",
+            competitor.name,
+        )
+    db.commit()
+    return len(stuck)
 
 
 async def _run_claimed(competitor_id: int) -> None:

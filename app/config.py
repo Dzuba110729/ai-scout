@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     # запустил бы вызовы все разом.
     claude_cli_concurrency: int = 3
 
+    # В конце каждого обхода дозаправляем ИИ-разбор для находок, оставшихся без
+    # него с прошлых прогонов (см. app/ai/backfill.py). Потолок за один обход:
+    # если CLI лежит совсем, не нужно долбить его сотнями попыток подряд.
+    # 0 — автодозаправка выключена.
+    ai_backfill_max_per_run: int = 50
+
     apify_api_token: str = ""
     apify_actor_id: str = "apify/website-content-crawler"
     apify_run_timeout_seconds: int = 600
