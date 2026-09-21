@@ -4,9 +4,15 @@ from app.ai.analyze import AiAnalysisResult
 from app.ai.compare import ComparisonResult
 from app.crawler.diff import ChangeType, PageDiff
 from app.integrations.google_docs import (
+    _COLUMN_WIDTH_WEIGHTS,
+    _HEADER,
+    _PAGE_SIDE_MARGIN_PT,
     GoogleDocsClient,
+    build_column_width_requests,
     build_insert_text_requests,
     build_row,
+    compute_column_widths_pt,
+    landscape_content_width_pt,
 )
 
 
@@ -19,7 +25,7 @@ def test_build_row_new_page_with_analysis():
 
     row = build_row(page_diff, analysis, detected_at)
 
-    assert row[0] == "2026-08-10 12:30"
+    assert row[0] == "2026-08-10\n12:30"
     assert row[1] == "Новая страница"
     assert row[2] == "https://x.ru/promo"
     assert row[3] == "лендинг"
@@ -163,7 +169,7 @@ class _FakeDocsService:
         return _FakeDocumentsResource(self._calls)
 
 
-def test_set_landscape_orientation_swaps_portrait_dimensions():
+def test_set_page_layout_swaps_portrait_dimensions_and_narrows_side_margins():
     calls: list[dict] = []
     client = GoogleDocsClient()
     client._docs_service = _FakeDocsService(calls)
@@ -172,15 +178,55 @@ def test_set_landscape_orientation_swaps_portrait_dimensions():
         "width": {"magnitude": 612, "unit": "PT"},
         "height": {"magnitude": 792, "unit": "PT"},
     }
-    client._set_landscape_orientation("doc-1", portrait)
+    client._set_page_layout("doc-1", portrait)
 
     assert len(calls) == 1
-    new_page_size = calls[0]["body"]["requests"][0]["updateDocumentStyle"]["documentStyle"]["pageSize"]
-    assert new_page_size["width"]["magnitude"] == 792
-    assert new_page_size["height"]["magnitude"] == 612
+    update = calls[0]["body"]["requests"][0]["updateDocumentStyle"]
+    assert update["documentStyle"]["pageSize"]["width"]["magnitude"] == 792
+    assert update["documentStyle"]["pageSize"]["height"]["magnitude"] == 612
+    assert update["documentStyle"]["marginLeft"]["magnitude"] == _PAGE_SIDE_MARGIN_PT
+    assert update["documentStyle"]["marginRight"]["magnitude"] == _PAGE_SIDE_MARGIN_PT
+    assert update["fields"] == "pageSize,marginLeft,marginRight"
 
 
-def test_set_landscape_orientation_leaves_already_landscape_untouched():
+def test_column_width_weights_match_header_and_sum_to_one():
+    assert len(_COLUMN_WIDTH_WEIGHTS) == len(_HEADER)
+    assert abs(sum(_COLUMN_WIDTH_WEIGHTS) - 1.0) < 1e-9
+
+
+def test_compute_column_widths_text_columns_wider_than_short_ones():
+    widths = compute_column_widths_pt(648)
+
+    assert len(widths) == len(_HEADER)
+    assert abs(sum(widths) - 648) < 1  # с учётом округления
+    date_col, category_col, summary_col = widths[0], widths[3], widths[6]
+    assert summary_col > date_col
+    assert summary_col > category_col
+
+
+def test_landscape_content_width_uses_longer_side_minus_narrow_margins():
+    portrait = {
+        "width": {"magnitude": 612, "unit": "PT"},
+        "height": {"magnitude": 792, "unit": "PT"},
+    }
+
+    assert landscape_content_width_pt(portrait) == 792 - 2 * _PAGE_SIDE_MARGIN_PT
+
+
+def test_build_column_width_requests_one_fixed_width_request_per_column():
+    requests = build_column_width_requests(table_start_index=5, widths_pt=[100.0, 250.5])
+
+    assert len(requests) == 2
+    first = requests[0]["updateTableColumnProperties"]
+    assert first["tableStartLocation"] == {"index": 5}
+    assert first["columnIndices"] == [0]
+    assert first["tableColumnProperties"]["widthType"] == "FIXED_WIDTH"
+    assert first["tableColumnProperties"]["width"] == {"magnitude": 100.0, "unit": "PT"}
+    assert requests[1]["updateTableColumnProperties"]["columnIndices"] == [1]
+    assert requests[1]["updateTableColumnProperties"]["tableColumnProperties"]["width"]["magnitude"] == 250.5
+
+
+def test_set_page_layout_keeps_already_landscape_dimensions():
     calls: list[dict] = []
     client = GoogleDocsClient()
     client._docs_service = _FakeDocsService(calls)
@@ -189,6 +235,9 @@ def test_set_landscape_orientation_leaves_already_landscape_untouched():
         "width": {"magnitude": 792, "unit": "PT"},
         "height": {"magnitude": 612, "unit": "PT"},
     }
-    client._set_landscape_orientation("doc-1", landscape)
+    client._set_page_layout("doc-1", landscape)
 
-    assert calls == []
+    assert len(calls) == 1
+    new_page_size = calls[0]["body"]["requests"][0]["updateDocumentStyle"]["documentStyle"]["pageSize"]
+    assert new_page_size["width"]["magnitude"] == 792
+    assert new_page_size["height"]["magnitude"] == 612
