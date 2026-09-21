@@ -8,3 +8,4 @@ google_oauth_token.json
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+logs/

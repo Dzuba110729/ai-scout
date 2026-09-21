@@ -29,7 +29,78 @@ uvicorn app.main:app --reload --port 8888
 pytest
 ```
 
-## Docker Compose
+## Прод на отдельном Маке (всегда включён, управление через Telegram)
+
+Рабочая схема: приложение запускается прямо на Маке (не в Docker) под присмотром
+launchd — штатной службы macOS, которая поднимает его после входа в систему и
+перезапускает при падении. В Docker живёт только Postgres. Проверено 2026-09-21.
+
+Почему не Docker для приложения: на Маке Claude Code хранит вход в подписку в
+Связке ключей (Keychain), а не в `~/.claude`. Linux-контейнер до Связки ключей не
+достаёт, поэтому `claude -p` внутри него отвечает «Not logged in», и ИИ-анализ не
+работает. `docker-compose.yml` оставлен для Linux-серверов.
+
+### Первичная установка
+
+```bash
+# 1. Код и зависимости
+git clone https://github.com/Dzuba110729/ai-scout.git ~/ai-scout
+cd ~/ai-scout
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python -m patchright install chromium
+
+# 2. База (Docker Desktop должен быть установлен и запущен)
+docker run -d --name ai-scout-db --restart unless-stopped \
+  -e POSTGRES_USER=scout -e POSTGRES_PASSWORD=scout -e POSTGRES_DB=ai_scout \
+  -p 5432:5432 postgres:16-alpine
+
+# 3. Секреты — переносятся руками с рабочего компьютера (в git их нет):
+#    .env, google_oauth_token.json, client_secret_*.json, папка storage_states/
+
+# 4. Claude Code CLI: установить и один раз войти в подписку
+claude          # внутри выполнить /login
+
+# 5. Служба launchd
+bash scripts/install_launchd.sh
+tail -f logs/app.log     # дождаться «Uvicorn running»
+```
+
+### Настройки самого Мака (обязательно)
+
+- **Docker Desktop → Settings → General → «Start Docker Desktop when you sign in»** —
+  включить. `scripts/run_prod.sh` сам откроет Docker, если он не запущен, но
+  автозапуск надёжнее.
+- **Системные настройки → Экономия энергии** (или «Батарея» на ноутбуке): запретить
+  автоматический сон, включить «Перезапуск после сбоя питания».
+- **Пользователи и группы → Автоматический вход** — включить для вашего пользователя.
+  Служба живёт в сеансе пользователя (ей нужны Связка ключей и Docker Desktop), без
+  входа в систему после перезагрузки она не поднимется.
+- **Google Cloud → Google Auth Platform → Audience → Publish app.** Пока OAuth-приложение
+  в статусе Testing, Google отзывает токен каждые 7 дней, и отчёты перестают
+  создаваться. Кнопка неактивна, пока на странице Branding не заполнены App name и
+  User support email. После публикации перевыпустить токен:
+  `python scripts/google_oauth_login.py`.
+
+### Обслуживание
+
+```bash
+tail -f logs/app.log                                    # логи
+launchctl kickstart -k gui/$(id -u)/ru.ai-scout.app     # перезапустить
+launchctl bootout gui/$(id -u)/ru.ai-scout.app          # остановить и снять службу
+
+# Обновить код
+cd ~/ai-scout && git pull && source .venv/bin/activate && pip install -e ".[dev]" \
+  && launchctl kickstart -k gui/$(id -u)/ru.ai-scout.app
+```
+
+Веб-интерфейс по умолчанию доступен только с самого Мака (http://127.0.0.1:8888).
+Чтобы открыть его другим устройствам в локальной сети, добавьте в `.env` строку
+`AI_SCOUT_BIND_HOST=0.0.0.0` и перезапустите службу — доступ по-прежнему под
+Basic Auth.
+
+## Docker Compose (Linux-сервер)
 
 ```bash
 cp .env.example .env
@@ -44,7 +115,8 @@ Compose поднимает Postgres и приложение, применяет 
 см. CLAUDE.md). Внутри контейнера установлен `@anthropic-ai/claude-code`, но ему
 нужна авторизация подписки. `docker-compose.yml` монтирует `~/.claude` с хоста в
 `/root/.claude:ro` внутри контейнера — авторизуйтесь на хосте один раз (`claude login`
-или как требует ваша подписка) до `docker compose up`.
+или как требует ваша подписка) до `docker compose up`. **На Маке это не работает**
+(вход хранится в Связке ключей, см. раздел выше) — на Linux-хосте не проверялось.
 
 ## Обход конкурентов и антибот-защита
 
