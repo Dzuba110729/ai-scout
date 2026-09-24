@@ -47,5 +47,5 @@ alembic upgrade head
 # По умолчанию веб-интерфейс виден только с самого Мака: управление идёт через Telegram.
 # Чтобы открыть его другим устройствам в локальной сети, добавьте в .env строку
 # AI_SCOUT_BIND_HOST=0.0.0.0 (приложение .env читает само, а этому скрипту нужно достать её вручную).
-BIND_HOST="$(grep -E '^AI_SCOUT_BIND_HOST=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+BIND_HOST="$(grep -E '^AI_SCOUT_BIND_HOST=' .env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]' || true)"
 exec uvicorn app.main:app --host "${BIND_HOST:-127.0.0.1}" --port 8888
