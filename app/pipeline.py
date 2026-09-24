@@ -63,10 +63,13 @@ from app.notifications.telegram import (
     format_error_message,
     format_finished_message,
     format_started_message,
+    report_buttons,
 )
 from app.own_site import load_own_site
 
 logger = logging.getLogger(__name__)
+
+_NO_CHANGES_NOTE = "Изменений с прошлого обхода не найдено."
 
 _CHANGE_TYPE_TO_DB = {
     ChangeType.NEW: DbChangeType.NEW,
@@ -115,11 +118,19 @@ def _latest_snapshots_by_url(db: Session, competitor_id: int) -> dict[str, tuple
     return result
 
 
-async def _notify(notifier: TelegramNotifier, db: Session, competitor: Competitor, text: str, *, page_change_id: int | None) -> None:
+async def _notify(
+    notifier: TelegramNotifier,
+    db: Session,
+    competitor: Competitor,
+    text: str,
+    *,
+    page_change_id: int | None,
+    buttons: list[list[dict]] | None = None,
+) -> None:
     status = NotificationStatus.SENT
     error = None
     try:
-        await notifier.send(text)
+        await notifier.send(text, buttons=buttons)
     except Exception as exc:
         status = NotificationStatus.FAILED
         error = str(exc)
@@ -137,7 +148,14 @@ async def _notify(notifier: TelegramNotifier, db: Session, competitor: Competito
     )
 
 
-async def _notify_progress(notifier: TelegramNotifier, db: Session, competitor: Competitor, text: str) -> None:
+async def _notify_progress(
+    notifier: TelegramNotifier,
+    db: Session,
+    competitor: Competitor,
+    text: str,
+    *,
+    buttons: list[list[dict]] | None = None,
+) -> None:
     """Рутинные сообщения «обход начат / завершён» — только по конкурентам.
 
     Наш собственный сайт обходится лишь ради свежих страниц для сравнения, его
@@ -146,7 +164,7 @@ async def _notify_progress(notifier: TelegramNotifier, db: Session, competitor: 
     """
     if competitor.is_own:
         return
-    await _notify(notifier, db, competitor, text, page_change_id=None)
+    await _notify(notifier, db, competitor, text, page_change_id=None, buttons=buttons)
 
 
 def _fetch_cache_lookup(db: Session, competitor_id: int) -> CacheLookup:
@@ -414,8 +432,14 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
 
         report_url = None
         # Отчёт в Google Docs — это отчёт по конкуренту; по нашему сайту он не нужен.
-        if report_rows and not competitor.is_own:
-            report_url = await _write_run_report(db, competitor, run_at, report_rows, notes)
+        # Создаём его и при нуле находок: «изменений нет» — тоже результат обхода,
+        # и бот всегда может прислать документ последнего обхода.
+        if not competitor.is_own:
+            report_notes = notes if report_rows else [*notes, _NO_CHANGES_NOTE]
+            report_url = await _write_run_report(db, competitor, run_at, report_rows, report_notes)
+            if report_url:
+                competitor.last_report_url = report_url
+                competitor.last_report_at = run_at
 
         competitor.last_crawl_finished_at = now
         if force_full:
@@ -429,7 +453,13 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             message_parts.append("\n".join(notes))
         if comparisons:
             message_parts.append(format_comparison_summary(comparisons))
-        await _notify_progress(notifier, db, competitor, "\n\n".join(message_parts))
+        await _notify_progress(
+            notifier,
+            db,
+            competitor,
+            "\n\n".join(message_parts),
+            buttons=report_buttons(competitor.id, report_url, competitor.google_drive_folder_url),
+        )
         db.commit()
 
         logger.info("Обход конкурента %s завершён: %s изменений", competitor.name, len(diffs))

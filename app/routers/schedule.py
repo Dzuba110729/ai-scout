@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import require_basic_auth
 from app.db import get_db
-from app.scheduler import get_schedule_config, reschedule_all
+from app.scheduler import get_schedule_config, set_interval
 from app.schemas import ScheduleConfigOut, ScheduleConfigUpdate
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"], dependencies=[Depends(require_basic_auth)])
@@ -16,16 +16,7 @@ def get_schedule(db: Session = Depends(get_db)):
 
 @router.put("", response_model=ScheduleConfigOut)
 def update_schedule(payload: ScheduleConfigUpdate, db: Session = Depends(get_db)):
-    if payload.interval_days <= 0 and payload.interval_hours <= 0:
-        raise HTTPException(status_code=422, detail="Интервал должен быть больше нуля")
-
-    config = get_schedule_config(db)
-    config.interval_days = payload.interval_days
-    config.interval_hours = payload.interval_hours
-    db.add(config)
-    db.commit()
-    db.refresh(config)
-
-    reschedule_all(db)
-
-    return config
+    try:
+        return set_interval(db, payload.interval_days, payload.interval_hours)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

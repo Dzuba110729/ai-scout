@@ -247,7 +247,7 @@ def test_progress_notifications_are_sent_only_for_competitors(is_own, monkeypatc
 
     sent = []
 
-    async def _fake_notify(_notifier, _db, competitor, text, *, page_change_id):
+    async def _fake_notify(_notifier, _db, competitor, text, *, page_change_id, buttons=None):
         sent.append(text)
 
     monkeypatch.setattr(pipeline, "_notify", _fake_notify)

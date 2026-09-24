@@ -78,6 +78,19 @@ def format_comparison_summary(
     return "\n".join(lines)
 
 
+def report_buttons(competitor_id: int, report_url: str | None, folder_url: str | None) -> list[list[dict]]:
+    """Кнопки под сообщением об окончании обхода: сам документ, папка со всеми
+    отчётами и лента находок в боте. callback_data обрабатывает app/telegram_bot.py —
+    уведомление уходит от того же бота, поэтому нажатие приходит туда же."""
+    rows: list[list[dict]] = []
+    if report_url:
+        rows.append([{"text": "📄 Открыть отчёт", "url": report_url}])
+    if folder_url:
+        rows.append([{"text": "📁 Все отчёты", "url": folder_url}])
+    rows.append([{"text": "🆕 Находки этого конкурента", "callback_data": f"chg:c{competitor_id}:all:1:n"}])
+    return rows
+
+
 def format_error_message(competitor_name: str, reason: str) -> str:
     return f"⛔ Обход конкурента «{competitor_name}» завершился ошибкой\nПричина: {reason}"
 
@@ -91,15 +104,15 @@ class TelegramNotifier:
     def is_configured(self) -> bool:
         return bool(self.bot_token and self.chat_id)
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, *, buttons: list[list[dict]] | None = None) -> None:
         if not self.is_configured:
             logger.warning("Telegram не настроен (нет токена/chat_id) — уведомление не отправлено: %s", text)
             return
 
         url = _TELEGRAM_API.format(token=self.bot_token)
+        payload: dict = {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": buttons}
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                url,
-                json={"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True},
-            )
+            response = await client.post(url, json=payload)
             response.raise_for_status()

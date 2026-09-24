@@ -84,15 +84,19 @@ def parse_ai_response(raw_text: str) -> AiAnalysisResult:
     )
 
 
-async def _run_claude_cli_once(prompt: str) -> str:
+async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cwd: str | None = None) -> str:
     process = await asyncio.create_subprocess_exec(
         settings.claude_cli_path,
         "-p",
         prompt,
         "--output-format",
         "text",
+        *extra_args,
+        # Без этого `claude -p` дочитывает stdin родителя и приклеивает его к промпту.
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -109,12 +113,14 @@ async def _run_claude_cli_once(prompt: str) -> str:
     return stdout.decode(errors="ignore")
 
 
-async def run_claude_cli(prompt: str, *, retries: int = 1) -> str:
+async def run_claude_cli(
+    prompt: str, *, retries: int = 1, extra_args: tuple[str, ...] = (), cwd: str | None = None
+) -> str:
     """Запускает `claude -p` headless, с одним ретраем при временной недоступности."""
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return await _run_claude_cli_once(prompt)
+            return await _run_claude_cli_once(prompt, extra_args, cwd)
         except ClaudeCliError as exc:
             last_error = exc
             logger.warning("Claude CLI попытка %s не удалась: %s", attempt + 1, exc)

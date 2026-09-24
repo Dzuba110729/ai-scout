@@ -88,6 +88,11 @@ class Competitor(Base):
     # полным. См. app.pipeline._needs_full_crawl и CLAUDE.md про инкрементальный обход.
     last_full_crawl_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Документ последнего обхода в Google Docs — чтобы бот мог прислать его в любой
+    # момент, а не только в сообщении об окончании обхода.
+    last_report_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_report_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     pages: Mapped[list["Page"]] = relationship(back_populates="competitor", cascade="all, delete-orphan")
 
     @property

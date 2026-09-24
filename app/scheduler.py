@@ -108,6 +108,25 @@ def reschedule_all(db) -> None:
     db.commit()
 
 
+def set_interval(db, days: int, hours: int) -> ScheduleConfig:
+    """Меняет общий интервал обхода и пересоздаёт job'ы — и из веба, и из бота.
+
+    ValueError — интервал нулевой или отрицательный.
+    """
+    if days < 0 or hours < 0 or (days == 0 and hours == 0):
+        raise ValueError("Интервал должен быть больше нуля")
+
+    config = get_schedule_config(db)
+    config.interval_days = days
+    config.interval_hours = hours
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+
+    reschedule_all(db)
+    return config
+
+
 def start_scheduler() -> None:
     db = SessionLocal()
     try:
