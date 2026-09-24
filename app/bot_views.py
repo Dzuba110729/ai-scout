@@ -182,9 +182,12 @@ def summary_text(db: Session) -> str:
     own = get_own_site(db)
     lines.append("")
     if own is None:
-        lines.append("🌐 Наш сайт не указан — без него нет сравнения «есть ли у нас такое».")
+        lines.append("🌐 Наш сайт не заведён — без него нет сравнения «есть ли у нас такое».")
     else:
-        lines.append(f"🌐 Наш сайт: {own.base_url}, обойдён {fmt_dt(own.last_crawl_finished_at, 'ещё не был')}")
+        state = f"⏳ идёт обход, {crawl_progress(db, own)}" if own.is_crawling else (
+            f"обойдён {fmt_dt(own.last_crawl_finished_at, 'ещё не был')}"
+        )
+        lines.append(f"🌐 Наш сайт: {own.base_url}, {state}")
 
     return "\n".join(lines)
 
@@ -240,9 +243,12 @@ def load_changes(
     page_size: int = CHANGES_PAGE_SIZE,
     since: datetime | None = None,
 ) -> ChangesPage:
-    conditions = [Competitor.is_own.is_(False)]
+    # Общая лента — только конкуренты. Лента одного сайта может быть и нашей:
+    # так смотрят, что изменилось на нашем сайте после его обхода.
     if competitor_id is not None:
-        conditions.append(Page.competitor_id == competitor_id)
+        conditions = [Page.competitor_id == competitor_id]
+    else:
+        conditions = [Competitor.is_own.is_(False)]
     change_type = CHANGE_KINDS.get(kind)
     if change_type is not None:
         conditions.append(PageChange.change_type == change_type)
@@ -302,8 +308,11 @@ def change_line(change: PageChange, *, with_competitor: bool = True, summary_lim
 
 
 def changes_text(db: Session, result: ChangesPage, *, competitor: Competitor | None, kind: str) -> str:
-    scope = f"по «{competitor.name}»" if competitor else "по всем конкурентам"
-    header = f"🆕 Находки {scope} — {CHANGE_KIND_LABELS[kind].lower()}"
+    if competitor is not None and competitor.is_own:
+        header = f"🌐 Изменения на нашем сайте {competitor.base_url} — {CHANGE_KIND_LABELS[kind].lower()}"
+    else:
+        scope = f"по «{competitor.name}»" if competitor else "по всем конкурентам"
+        header = f"🆕 Находки {scope} — {CHANGE_KIND_LABELS[kind].lower()}"
     if not result.items:
         return f"{header}\n\nПока ничего нет."
 
@@ -323,7 +332,7 @@ def reports_text(db: Session) -> str:
             lines.append(f"— {c.name}: последний от {fmt_dt(c.last_report_at)}")
         else:
             lines.append(f"— {c.name}: отчётов ещё не было")
-    lines += ["", "Кнопки ниже открывают последний отчёт и папку со всеми отчётами конкурента."]
+    lines += ["", "Кнопки ниже открывают последний отчёт и папку со всеми отчётами."]
     return "\n".join(lines)
 
 

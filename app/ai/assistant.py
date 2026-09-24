@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 HISTORY_TURNS = 6
 CONTEXT_CHANGES_LIMIT = 40
 
-SECTIONS = ("summary", "competitors", "changes", "reports", "digest", "settings", "help", "own_site")
+SECTIONS = ("summary", "competitors", "changes", "own_changes", "reports", "digest", "settings", "help", "own_site")
 CHANGE_KINDS = tuple(bot_views.CHANGE_KINDS)
 
 # Действие -> обязательные аргументы. Всё, чего здесь нет, код бота не выполнит.
@@ -45,7 +45,6 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "crawl_all": (),
     "crawl_own": (),
     "add_competitor": ("name", "url"),
-    "set_own_site": ("url",),
     "set_schedule": ("days", "hours"),
     "show": ("section",),
 }
@@ -67,15 +66,15 @@ SYSTEM_PROMPT = """Ты — помощник в Telegram-боте «AI-Скау�
 - stop {competitor_id} — остановить идущий обход;
 - pause {competitor_id} / resume {competitor_id} — поставить на паузу / снять с паузы плановые обходы;
 - crawl_all {} — обойти всех конкурентов (кроме тех, что на паузе);
-- crawl_own {} — обойти наш сайт;
+- crawl_own {} — обойти наш сайт (он фиксированный, адрес не меняется), итог бот пришлёт сам;
 - add_competitor {name, url} — добавить конкурента (url сайта, можно без https://);
 - delete_competitor {competitor_id} — удалить конкурента со всей историей (бот сам спросит подтверждение);
-- set_own_site {url} — указать или сменить адрес нашего сайта;
 - set_schedule {days, hours} — интервал плановых обходов, например раз в неделю: days=7, hours=0;
 - show {section, competitor_id?, kind?} — показать раздел с кнопками. section: summary (сводка),
   competitors (список или карточка конкурента, если указан competitor_id), changes (лента находок;
   kind: all|important|new|changed|removed; можно competitor_id), reports (ссылки на отчёты),
-  digest (дайджест за неделю), settings, help, own_site. Используй show, когда человек хочет
+  own_changes (что изменилось на нашем сайте), own_site (статус обхода нашего сайта),
+  digest (дайджест за неделю), settings, help. Используй show, когда человек хочет
   «посмотреть/открыть/показать» список, отчёт, дайджест и т.п.
 
 Находки с пометкой 🔥 ИИ оценил как важные (цены, акции, новые продукты и офферы) — на вопросы
@@ -164,11 +163,17 @@ def build_context(db: Session) -> str:
 
     own = get_own_site(db)
     lines.append("")
-    lines.append(
-        f"Наш сайт: {own.base_url}, обойдён {bot_views.fmt_dt(own.last_crawl_finished_at, 'ещё не был')}"
-        if own
-        else "Наш сайт: не указан"
-    )
+    if own is None:
+        lines.append("Наш сайт: не заведён")
+    else:
+        lines.append(
+            f"Наш сайт: {own.base_url}, обойдён {bot_views.fmt_dt(own.last_crawl_finished_at, 'ещё не был')}"
+            + (f"; идёт обход: {bot_views.crawl_progress(db, own)}" if own.is_crawling else "")
+        )
+        own_recent = bot_views.load_changes(db, competitor_id=own.id, page_size=15, since=now - timedelta(days=30))
+        lines.append(f"Изменения на нашем сайте за 30 дней (всего {own_recent.total}):")
+        for change in own_recent.items:
+            lines.append(bot_views.change_line(change, with_competitor=False, summary_limit=200).replace("\n", " | "))
 
     recent = bot_views.load_changes(db, page_size=CONTEXT_CHANGES_LIMIT, since=now - timedelta(days=30))
     lines.append("")

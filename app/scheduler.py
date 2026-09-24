@@ -1,12 +1,17 @@
-"""Планировщик обхода конкурентов (APScheduler, без Celery/Redis — см. CLAUDE.md).
+"""Планировщик обходов (APScheduler, без Celery/Redis — см. CLAUDE.md).
 
-Расписание общее для всех конкурентов (ScheduleConfig, редактируется через UI),
-но каждый конкурент обходится своей независимой job — APScheduler запускает их
-как отдельные asyncio-задачи, поэтому конкуренты обходятся параллельно.
+Плановый обход — один общий цикл раз в интервал (ScheduleConfig, по умолчанию
+неделя, меняется в UI и в боте): сначала наш сайт, до конца, и только потом все
+конкуренты. Порядок важен: находки конкурентов сравниваются с нашим сайтом («есть
+ли у нас такое»), и сравнивать нужно со свежей его версией. Раньше у каждого сайта
+был свой независимый таймер, и конкурент мог обойтись раньше нашего сайта.
 
-Сам запуск обхода планировщик не делает: и он, и кнопка в интерфейсе идут через
-app/crawl_manager.py — там и защита от повторного запуска, и общий лимит
-одновременных обходов.
+Когда будет следующий цикл, хранится в БД (ScheduleConfig.next_run_at), а не
+только в памяти планировщика: иначе каждый перезапуск сервиса отодвигал бы обход
+на полный интервал, и при перезапусках чаще раза в неделю он не наступал никогда.
+
+Сам запуск обходов планировщик не делает: он идёт через app/crawl_manager.py —
+там и защита от повторного запуска, и общий лимит одновременных обходов.
 """
 
 import logging
@@ -20,17 +25,18 @@ from app import crawl_manager
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Competitor, ScheduleConfig
+from app.own_site import get_own_site
 
 logger = logging.getLogger(__name__)
 
 scheduler = AsyncIOScheduler()
 
-_JOB_PREFIX = "crawl_competitor_"
+CYCLE_JOB_ID = "crawl_cycle"
 DIGEST_JOB_ID = "weekly_digest"
 
-
-def _job_id(competitor_id: int) -> str:
-    return f"{_JOB_PREFIX}{competitor_id}"
+# Просроченный цикл (Мак спал, сервис лежал) запускается вскоре после старта —
+# не в первую же секунду, а когда сервис поднялся целиком.
+_OVERDUE_DELAY = timedelta(minutes=2)
 
 
 def get_schedule_config(db) -> ScheduleConfig:
@@ -47,72 +53,105 @@ def interval_timedelta(config: ScheduleConfig) -> timedelta:
     return timedelta(days=config.interval_days, hours=config.interval_hours)
 
 
-async def _run_scheduled_crawl(competitor_id: int) -> None:
+def _aware(value: datetime | None) -> datetime | None:
+    # Postgres отдаёт даты с часовым поясом, SQLite (тесты) — без; считаем такие UTC.
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def plan_next_run(saved: datetime | None, interval: timedelta, now: datetime, *, reset: bool) -> datetime:
+    """Когда запускать следующий цикл.
+
+    reset=False (старт сервиса): сохранённое время уважаем, просроченное — вскоре
+    после старта. reset=True (сменили интервал) или времени ещё нет — через
+    интервал от сейчас.
+    """
+    saved = _aware(saved)
+    if reset or saved is None:
+        return now + interval
+    if saved <= now + _OVERDUE_DELAY:
+        return now + _OVERDUE_DELAY
+    return saved
+
+
+def _show_next_run(db, next_run: datetime) -> None:
+    """next_crawl_at у сайтов — только для показа в UI и боте («следующий обход»):
+    у всех, кто не на паузе, это время ближайшего цикла."""
+    for competitor in db.query(Competitor).filter(Competitor.is_paused.is_(False)).all():
+        competitor.next_crawl_at = next_run
+        db.add(competitor)
+
+
+async def run_crawl_cycle() -> None:
+    """Плановый цикл: наш сайт целиком, затем все конкуренты (кроме тех, что на паузе)."""
     db = SessionLocal()
     try:
-        competitor = db.get(Competitor, competitor_id)
-        if competitor is None:
-            return
+        own = get_own_site(db)
+        if own is not None and not own.is_paused:
+            logger.info("Плановый цикл: обходим наш сайт")
+            if not await crawl_manager.run_now(db, own):
+                # Обход нашего сайта уже идёт (запущен вручную) — ждать его не будем:
+                # конкурентов сравним с тем, что уже сохранено.
+                logger.info("Плановый цикл: обход нашего сайта уже идёт — сразу к конкурентам")
+            db.expire_all()
 
-        if not await crawl_manager.run_now(db, competitor):
-            logger.info(
-                "Плановый обход конкурента %s пропущен — он на паузе или обход уже идёт",
-                competitor.name,
-            )
+        result = crawl_manager.start_all(db)
+        logger.info(
+            "Плановый цикл: конкуренты — запущено %s, уже шли %s, на паузе %s",
+            result.started,
+            result.skipped_running,
+            result.skipped_paused,
+        )
 
+        job = scheduler.get_job(CYCLE_JOB_ID)
         config = get_schedule_config(db)
-        # Обход шёл в своей сессии БД — наша копия конкурента устарела.
-        db.expire(competitor)
-        competitor.next_crawl_at = datetime.now(UTC) + interval_timedelta(config)
-        db.add(competitor)
+        next_run = job.next_run_time if job is not None else datetime.now(UTC) + interval_timedelta(config)
+        config.next_run_at = next_run
+        db.add(config)
+        _show_next_run(db, next_run)
         db.commit()
+    except Exception:
+        logger.exception("Плановый цикл обходов завершился ошибкой")
     finally:
         db.close()
 
 
-def schedule_competitor(competitor_id: int, config: ScheduleConfig) -> None:
+def schedule_cycle(db, *, reset: bool = False) -> datetime:
+    """Ставит (или переставляет) плановый цикл. Возвращает время ближайшего запуска."""
+    config = get_schedule_config(db)
+    interval = interval_timedelta(config)
+    next_run = plan_next_run(config.next_run_at, interval, datetime.now(UTC), reset=reset)
+
     scheduler.add_job(
-        _run_scheduled_crawl,
-        trigger=IntervalTrigger(days=config.interval_days, hours=config.interval_hours),
-        id=_job_id(competitor_id),
-        args=[competitor_id],
+        run_crawl_cycle,
+        trigger=IntervalTrigger(days=config.interval_days, hours=config.interval_hours, start_date=next_run),
+        id=CYCLE_JOB_ID,
         replace_existing=True,
+        # Мак спал в момент срабатывания — обойти, как только проснулся, а не
+        # молча ждать ещё интервал.
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
     )
 
+    config.next_run_at = next_run
+    db.add(config)
+    _show_next_run(db, next_run)
+    db.commit()
+    return next_run
 
-def schedule_competitor_and_save_next_run(db, competitor: Competitor, config: ScheduleConfig) -> None:
-    """schedule_competitor + сразу проставляет next_crawl_at, чтобы UI не ждал первого тика."""
-    schedule_competitor(competitor.id, config)
-    competitor.next_crawl_at = datetime.now(UTC) + interval_timedelta(config)
+
+def sync_next_run(db, competitor: Competitor) -> None:
+    """Новый или снятый с паузы сайт попадает в ближайший общий цикл — отдельного
+    таймера у него нет. Проставляем время цикла, чтобы UI и бот его показывали."""
+    competitor.next_crawl_at = _aware(get_schedule_config(db).next_run_at)
     db.add(competitor)
     db.commit()
 
 
-def unschedule_competitor(competitor_id: int) -> None:
-    job_id = _job_id(competitor_id)
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-
-
-def reschedule_all(db) -> None:
-    """Перечитывает ScheduleConfig и пересоздаёт job'ы всех активных конкурентов.
-
-    Вызывается при старте приложения и при изменении расписания через UI.
-    """
-    config = get_schedule_config(db)
-    interval = interval_timedelta(config)
-    now = datetime.now(UTC)
-
-    competitors = db.query(Competitor).filter(Competitor.is_paused.is_(False)).all()
-    for competitor in competitors:
-        schedule_competitor(competitor.id, config)
-        competitor.next_crawl_at = now + interval
-        db.add(competitor)
-    db.commit()
-
-
 def set_interval(db, days: int, hours: int) -> ScheduleConfig:
-    """Меняет общий интервал обхода и пересоздаёт job'ы — и из веба, и из бота.
+    """Меняет интервал плановых обходов — и из веба, и из бота.
 
     ValueError — интервал нулевой или отрицательный.
     """
@@ -124,9 +163,9 @@ def set_interval(db, days: int, hours: int) -> ScheduleConfig:
     config.interval_hours = hours
     db.add(config)
     db.commit()
-    db.refresh(config)
 
-    reschedule_all(db)
+    schedule_cycle(db, reset=True)
+    db.refresh(config)
     return config
 
 
@@ -151,9 +190,9 @@ def schedule_digest() -> None:
 def start_scheduler() -> None:
     db = SessionLocal()
     try:
-        reschedule_all(db)
+        next_run = schedule_cycle(db)
     finally:
         db.close()
     schedule_digest()
     scheduler.start()
-    logger.info("Планировщик запущен")
+    logger.info("Планировщик запущен, ближайший плановый цикл обходов: %s", next_run.isoformat())

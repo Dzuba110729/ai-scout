@@ -10,14 +10,11 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError
 from app.models import Competitor, SessionStatus
 from app.own_site import OWN_SITE_NAME, get_own_site
-from app.scheduler import (
-    get_schedule_config,
-    schedule_competitor_and_save_next_run,
-    unschedule_competitor,
-)
+from app.scheduler import sync_next_run
 
 logger = logging.getLogger(__name__)
 
@@ -38,30 +35,28 @@ def create_competitor(db: Session, name: str, base_url: str) -> Competitor:
     db.commit()
     db.refresh(competitor)
 
-    config = get_schedule_config(db)
-    schedule_competitor_and_save_next_run(db, competitor, config)
+    sync_next_run(db, competitor)
     db.refresh(competitor)
     return competitor
 
 
 def pause_competitor(db: Session, competitor: Competitor) -> None:
+    # Отдельного таймера у сайта нет: общий плановый цикл просто пропускает тех,
+    # кто на паузе (см. app/scheduler.py).
     competitor.is_paused = True
     db.commit()
     db.refresh(competitor)
-    unschedule_competitor(competitor.id)
 
 
 def resume_competitor(db: Session, competitor: Competitor) -> None:
     competitor.is_paused = False
     db.commit()
     db.refresh(competitor)
-    config = get_schedule_config(db)
-    schedule_competitor_and_save_next_run(db, competitor, config)
+    sync_next_run(db, competitor)
     db.refresh(competitor)
 
 
 def delete_competitor(db: Session, competitor: Competitor) -> None:
-    unschedule_competitor(competitor.id)
     db.delete(competitor)
     db.commit()
 
@@ -79,6 +74,16 @@ def normalize_url(raw: str) -> str:
             raise ValueError("Адрес должен начинаться с http:// или https://")
         url = f"https://{url}"
     return url
+
+
+def ensure_own_site(db: Session) -> Competitor | None:
+    """Заводит наш сайт по settings.own_site_url, если его ещё нет. Существующий
+    не трогает: адрес мог быть задан в веб-интерфейсе."""
+    own = get_own_site(db)
+    if own is not None or not settings.own_site_url:
+        return own
+    logger.info("Заводим наш сайт %s", settings.own_site_url)
+    return save_own_site(db, settings.own_site_url)
 
 
 def save_own_site(db: Session, base_url: str, name: str | None = None) -> Competitor:
@@ -102,7 +107,6 @@ def save_own_site(db: Session, base_url: str, name: str | None = None) -> Compet
     db.commit()
     db.refresh(own)
 
-    config = get_schedule_config(db)
-    schedule_competitor_and_save_next_run(db, own, config)
+    sync_next_run(db, own)
     db.refresh(own)
     return own

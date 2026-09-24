@@ -59,12 +59,16 @@ from app.models import (
 )
 from app.notifications.telegram import (
     TelegramNotifier,
+    format_baseline_finished,
+    format_baseline_note,
     format_blocked_message,
     format_comparison_summary,
     format_error_message,
     format_finished_message,
     format_important_summary,
+    format_own_site_finished,
     format_started_message,
+    own_site_buttons,
     report_buttons,
 )
 from app.own_site import load_own_site
@@ -160,9 +164,9 @@ async def _notify_progress(
 ) -> None:
     """Рутинные сообщения «обход начат / завершён» — только по конкурентам.
 
-    Наш собственный сайт обходится лишь ради свежих страниц для сравнения, его
-    обход новостью не является. Про сломавшийся обход сообщаем по любому сайту —
-    это идёт мимо этой функции.
+    Итог обхода нашего сайта уходит отдельно, своим сообщением «что изменилось на
+    нашем сайте» (см. run_crawl_for_competitor). Про сломавшийся обход сообщаем по
+    любому сайту — это идёт мимо этой функции.
     """
     if competitor.is_own:
         return
@@ -364,9 +368,17 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         # Подготовка (быстрая работа с БД) — строго последовательно: page_change.id
         # нужен ДО вызова ИИ, а один SQLAlchemy Session нельзя дёргать из по-настоящему
         # параллельных операций разом.
+        # Первый обход сайта: сравнивать не с чем, и diff_crawl объявил бы «новой» каждую
+        # страницу — на сайте в 2000 страниц это 2000 вызовов ИИ, отчёт на 2000 строк и
+        # лента, забитая мусором. Поэтому первый обход — только точка отсчёта: страницы
+        # и их текст сохраняем, находками не считаем.
+        is_baseline = not previous_by_url
         prepared: list[tuple[PageDiff, Page, PageChange, str | None]] = []
         for page_diff in diffs:
             page = _apply_page_diff(db, competitor, page_diff, previous_by_url, crawl_result.sitemap_lastmod)
+            if is_baseline:
+                _save_baseline_snapshot(db, page, page_diff)
+                continue
             check = checks.get(page_diff.url)
             moved = check.final_url if check and check.reason is DisappearReason.MOVED else None
             if moved:
@@ -443,11 +455,14 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             notes.append(_format_backfill_note(backfilled, attempted))
 
         report_url = None
-        # Отчёт в Google Docs — это отчёт по конкуренту; по нашему сайту он не нужен.
-        # Создаём его и при нуле находок: «изменений нет» — тоже результат обхода,
-        # и бот всегда может прислать документ последнего обхода.
+        # Отчёт в Google Docs — только по конкурентам и после каждого их обхода, даже
+        # при нуле находок: «изменений нет» — тоже результат. По нашему сайту отчёт
+        # не нужен (решение владельца): что на нём изменилось, бот присылает в чат.
         if not competitor.is_own:
-            report_notes = notes if report_rows else [*notes, _NO_CHANGES_NOTE]
+            if is_baseline:
+                report_notes = [*notes, format_baseline_note(len(diffs))]
+            else:
+                report_notes = notes if report_rows else [*notes, _NO_CHANGES_NOTE]
             report_url = await _write_run_report(db, competitor, run_at, report_rows, report_notes)
             if report_url:
                 competitor.last_report_url = report_url
@@ -460,7 +475,31 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         _clear_fetch_cache(db, competitor.id)
         await asyncio.to_thread(db.commit)
 
-        message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
+        if competitor.is_own:
+            # Наш сайт обходят по кнопке «обойти наш сайт», чтобы проверить, что на нём
+            # поменялось, — итог нужен так же, как по конкуренту, но в своём виде.
+            own_items = [
+                (page_diff, analysis)
+                for (page_diff, _page, _change, _moved), analysis in zip(prepared, analyses, strict=True)
+            ]
+            await _notify(
+                notifier,
+                db,
+                competitor,
+                format_own_site_finished(
+                    competitor.base_url, own_items, baseline_pages=len(diffs) if is_baseline else None
+                ),
+                page_change_id=None,
+                buttons=own_site_buttons(competitor.id) if own_items else None,
+            )
+            db.commit()
+            logger.info("Обход нашего сайта завершён: %s изменений", len(own_items))
+            return
+
+        if is_baseline:
+            message_parts = [format_baseline_finished(competitor.name, len(diffs), report_url)]
+        else:
+            message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
         if important:
             message_parts.append(format_important_summary(important))
         if notes:
@@ -476,7 +515,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         )
         db.commit()
 
-        logger.info("Обход конкурента %s завершён: %s изменений", competitor.name, len(diffs))
+        logger.info("Обход конкурента %s завершён: %s изменений", competitor.name, len(prepared))
 
     except (ApifyCrawlError, CompetitorBlockedError) as exc:
         db.rollback()
@@ -686,6 +725,13 @@ def _apply_page_diff(
 
     previous_by_url[page_diff.url] = (page, "")
     return page
+
+
+def _save_baseline_snapshot(db: Session, page: Page, page_diff: PageDiff) -> None:
+    """Текст страницы с первого обхода — без записи «изменения»: следующий обход
+    будет сравнивать с ним (см. _latest_snapshots_by_url)."""
+    text = page_diff.new_text or ""
+    db.add(PageSnapshot(page_id=page.id, content_hash=content_hash(text), text_content=text))
 
 
 def _record_change(db: Session, page: Page, page_diff: PageDiff) -> PageChange:

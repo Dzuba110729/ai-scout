@@ -79,6 +79,65 @@ def format_comparison_summary(
     return "\n".join(lines)
 
 
+def format_baseline_note(pages: int) -> str:
+    return (
+        f"Первый обход: сохранили {pages} страниц как точку отсчёта. Со следующего обхода "
+        "здесь будут новые, изменённые и удалённые страницы."
+    )
+
+
+def format_baseline_finished(competitor_name: str, pages: int, report_url: str | None) -> str:
+    lines = [
+        f"✅ Первый обход «{competitor_name}» завершён",
+        f"Запомнили {pages} страниц — это точка отсчёта. Изменения начнём ловить со следующего обхода.",
+    ]
+    if report_url:
+        lines.append(f"Отчёт: {report_url}")
+    return "\n".join(lines)
+
+
+_OWN_SITE_LIST_LIMIT = 10
+
+
+def format_own_site_finished(
+    site_url: str,
+    items: list[tuple[PageDiff, AiAnalysisResult | None]],
+    *,
+    baseline_pages: int | None = None,
+) -> str:
+    """Итог обхода нашего сайта: что на нём поменялось с прошлого обхода."""
+    if baseline_pages is not None:
+        return (
+            f"🌐 Первый обход нашего сайта {site_url} завершён\n"
+            f"Запомнили {baseline_pages} страниц. Со следующего обхода покажу, что на сайте изменилось."
+        )
+    if not items:
+        return f"🌐 Обход нашего сайта {site_url} завершён\nС прошлого обхода ничего не изменилось."
+
+    counts: dict[ChangeType, int] = {}
+    for page_diff, _analysis in items:
+        counts[page_diff.change_type] = counts.get(page_diff.change_type, 0) + 1
+    emoji = {ChangeType.NEW: "🆕", ChangeType.CHANGED: "✏️", ChangeType.REMOVED: "🗑"}
+    lines = [
+        f"🌐 Обход нашего сайта {site_url} завершён",
+        "Изменилось: " + ", ".join(f"{emoji[kind]} {n}" for kind, n in counts.items()),
+    ]
+    for page_diff, analysis in items[:_OWN_SITE_LIST_LIMIT]:
+        lines.append("")
+        lines.append(f"{emoji[page_diff.change_type]} {page_diff.url}")
+        if analysis and analysis.summary:
+            lines.append(analysis.summary)
+    remaining = len(items) - _OWN_SITE_LIST_LIMIT
+    if remaining > 0:
+        lines.append("")
+        lines.append(f"И ещё {remaining} — смотрите кнопкой ниже.")
+    return "\n".join(lines)
+
+
+def own_site_buttons(own_site_id: int) -> list[list[dict]]:
+    return [[{"text": "🆕 Все изменения на нашем сайте", "callback_data": f"chg:c{own_site_id}:all:1:n"}]]
+
+
 def format_important_summary(items: list[tuple[str, AiAnalysisResult]], limit: int = 5) -> str:
     """Блок «🔥 Важное» в итоговом сообщении — ради него сообщение и читают."""
     lines = ["🔥 Важное:"]

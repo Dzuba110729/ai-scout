@@ -57,7 +57,7 @@ BTN_COMPETITORS = "🏢 Конкуренты"
 BTN_CHANGES = "🆕 Находки"
 BTN_REPORTS = "📄 Отчёты"
 BTN_CRAWL_ALL = "🔄 Обойти всех"
-BTN_OWN_SITE = "🌐 Наш сайт"
+BTN_CRAWL_OWN = "🔄 Обойти наш сайт"
 BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❓ Помощь"
 
@@ -65,7 +65,7 @@ MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_COMPETITORS)],
         [KeyboardButton(text=BTN_CHANGES), KeyboardButton(text=BTN_REPORTS)],
-        [KeyboardButton(text=BTN_CRAWL_ALL), KeyboardButton(text=BTN_OWN_SITE)],
+        [KeyboardButton(text=BTN_CRAWL_ALL), KeyboardButton(text=BTN_CRAWL_OWN)],
         [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_HELP)],
     ],
     resize_keyboard=True,
@@ -102,7 +102,7 @@ HELP_TEXT = """❓ Что умеет бот
 — 🆕 Находки: лента новых, изменённых и удалённых страниц с фильтрами; нажмите номер — откроется подробный разбор
 — 📄 Отчёты: ссылки на последние отчёты в Google Docs и папки со всеми отчётами
 — 🔄 Обойти всех: запустить обход всех конкурентов прямо сейчас
-— 🌐 Наш сайт: адрес и обход нашего сайта (с ним сравниваются находки)
+— 🔄 Обойти наш сайт: проверить, что изменилось на og1.ru — итог придёт, когда обход закончится
 — ⚙️ Настройки: как часто обходить, что подключено
 
 После каждого обхода бот сам пришлёт итог, 🔥 важные находки и кнопку «📄 Открыть отчёт».
@@ -120,16 +120,15 @@ HELP_TEXT = """❓ Что умеет бот
 — «какие цены поменялись?»
 — «что важного за неделю?»
 
+Первый обход любого сайта — точка отсчёта: страницы запоминаются, а изменения
+ловятся со следующего обхода.
+
 /start — вернуть меню, если оно пропало."""
 
 
 class AddCompetitor(StatesGroup):
     name = State()
     base_url = State()
-
-
-class EditOwnSite(StatesGroup):
-    url = State()
 
 
 class AllowlistMiddleware(BaseMiddleware):
@@ -268,7 +267,9 @@ def _changes_screen(db, scope: str, kind: str, page: int) -> tuple[str, InlineKe
     if result.page < result.total_pages:
         nav.append(_btn("▶️", f"chg:{scope}:{kind}:{result.page + 1}"))
     rows.append(nav)
-    if competitor:
+    if competitor and competitor.is_own:
+        rows.append([_btn("🔄 Обойти наш сайт", "own:crawl"), _btn("Находки конкурентов", f"chg:all:{kind}:1")])
+    elif competitor:
         rows.append([_btn("← К конкуренту", f"comp:{competitor.id}"), _btn("Все конкуренты", f"chg:all:{kind}:1")])
     return text, _kb(rows)
 
@@ -324,25 +325,26 @@ def _reports_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
 
 
 def _own_site_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Наш сайт — фиксированный (settings.own_site_url), поэтому здесь только его
+    обход и изменения: «обошли — посмотрели, что поменялось»."""
     own = get_own_site(db)
     if own is None:
-        return (
-            "🌐 Наш сайт ещё не указан. С ним бот сравнивает находки у конкурентов: «есть ли у нас такое».",
-            _kb([[_btn("✏️ Указать адрес", "own:edit")]]),
-        )
+        return "🌐 Наш сайт не заведён — перезапустите сервис, он создастся сам.", None
     text = (
-        f"🌐 {own.name}\n{own.base_url}\n\n"
-        f"Статус: {bot_views.status_line(own)}\n"
+        f"🌐 Наш сайт {own.base_url}\n\n"
+        f"Статус: {'⏳ обход идёт' if own.is_crawling else 'обход не идёт'}\n"
         f"Последний обход: {bot_views.fmt_dt(own.last_crawl_finished_at, 'ещё не было')}"
     )
     progress = bot_views.crawl_progress(db, own)
     if progress:
         text += f"\nПрогресс: {progress}"
+    if own.is_crawling:
+        text += "\n\nКогда обход закончится, пришлю, что изменилось."
     action = _btn("⏹ Остановить обход", "own:stop") if own.is_crawling else _btn("▶️ Обойти сейчас", "own:crawl")
     return text, _kb(
         [
-            [action],
-            [_btn("✏️ Сменить адрес", "own:edit"), _url_btn("🌐 Открыть", own.base_url)],
+            [action, _btn("🔄 Обновить", "sec:own_site")],
+            [_btn("🆕 Изменения на нашем сайте", f"chg:c{own.id}:all:1")],
         ]
     )
 
@@ -457,9 +459,14 @@ async def _execute(db, action: AssistantAction) -> tuple[str, InlineKeyboardMark
     if kind == "crawl_own":
         own = get_own_site(db)
         if own is None:
-            return "Наш сайт ещё не указан — задайте адрес в разделе «🌐 Наш сайт».", None
+            return "Наш сайт не заведён — перезапустите сервис, он создастся сам.", None
         ok = crawl_manager.start(db, own)
-        return ("▶️ Обход нашего сайта запущен." if ok else "Обход нашего сайта уже идёт."), None
+        text = (
+            f"▶️ Обход нашего сайта {own.base_url} запущен. Когда закончится — пришлю, что изменилось."
+            if ok
+            else "Обход нашего сайта уже идёт — итог пришлю, когда закончится."
+        )
+        return text, _kb([[_btn("Статус обхода", "sec:own_site")]])
 
     if kind == "add_competitor":
         name = str(action.args.get("name") or "").strip()
@@ -477,13 +484,6 @@ async def _execute(db, action: AssistantAction) -> tuple[str, InlineKeyboardMark
             ),
             _kb([[_btn("▶️ Обойти сейчас", f"comp:{competitor.id}:crawl"), _btn("Карточка", f"comp:{competitor.id}")]]),
         )
-
-    if kind == "set_own_site":
-        try:
-            own = competitor_ops.save_own_site(db, str(action.args.get("url") or ""))
-        except ValueError as exc:
-            return f"Не сохранил: {exc}.", None
-        return f"🌐 Адрес нашего сайта: {own.base_url}", _kb([[_btn("▶️ Обойти его сейчас", "own:crawl")]])
 
     if kind == "set_schedule":
         days = action.int_arg("days") or 0
@@ -551,7 +551,6 @@ _BUTTON_SECTIONS = {
     BTN_COMPETITORS: "competitors",
     BTN_CHANGES: "changes",
     BTN_REPORTS: "reports",
-    BTN_OWN_SITE: "own_site",
     BTN_SETTINGS: "settings",
     BTN_HELP: "help",
 }
@@ -579,6 +578,17 @@ async def menu_crawl_all(message: Message, state: FSMContext) -> None:
     finally:
         db.close()
     await message.answer(_crawl_all_text(result))
+
+
+@router.message(F.text == BTN_CRAWL_OWN)
+async def menu_crawl_own(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    db = SessionLocal()
+    try:
+        text, markup = await _execute(db, AssistantAction("crawl_own"))
+    finally:
+        db.close()
+    await message.answer(text, reply_markup=markup)
 
 
 # ---------------------------------------------------------------- нажатия inline-кнопок
@@ -712,13 +722,6 @@ async def cb_own_site_action(callback: CallbackQuery) -> None:
     await _show(callback, text, markup)
 
 
-@router.callback_query(F.data == "own:edit")
-async def cb_own_site_edit(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(EditOwnSite.url)
-    await _show(callback, "Пришлите адрес нашего сайта, например og1.ru", _kb([[_btn("Отмена", "sec:own_site")]]))
-    await callback.answer()
-
-
 @router.callback_query(F.data.regexp(r"^set:\d+:\d+$"))
 async def cb_set_schedule(callback: CallbackQuery) -> None:
     _, days, hours = callback.data.split(":")
@@ -772,20 +775,6 @@ async def add_url_received(message: Message, state: FSMContext) -> None:
     await message.answer(text, reply_markup=markup)
 
 
-@router.message(EditOwnSite.url)
-async def own_site_url_received(message: Message, state: FSMContext) -> None:
-    db = SessionLocal()
-    try:
-        text, markup = await _execute(db, AssistantAction("set_own_site", {"url": message.text or ""}))
-    finally:
-        db.close()
-    if text.startswith("Не сохранил"):
-        await message.answer(f"{text} Введите ещё раз, или /start для отмены.")
-        return
-    await state.clear()
-    await message.answer(text, reply_markup=markup)
-
-
 # ---------------------------------------------------------------- свободный текст -> ИИ
 
 
@@ -817,6 +806,10 @@ async def free_text(message: Message, bot: Bot) -> None:
             if section == "changes":
                 kind = str(action.args.get("kind") or "all")
                 await _show_changes(message, f"c{competitor_id}" if competitor_id else "all", kind, 1)
+            elif section == "own_changes":
+                own = get_own_site(db)
+                if own is not None:
+                    await _show_changes(message, f"c{own.id}", "all", 1)
             elif section == "competitors" and competitor_id:
                 await _show_competitor(message, competitor_id)
             else:

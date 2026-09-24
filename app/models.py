@@ -235,6 +235,9 @@ class ScheduleConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     interval_days: Mapped[int] = mapped_column(default=7)
     interval_hours: Mapped[int] = mapped_column(default=0)
+    # Когда запустится следующий плановый цикл обходов (см. app/scheduler.py) —
+    # в БД, чтобы перезапуск сервиса не отодвигал его на полный интервал.
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

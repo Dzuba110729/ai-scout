@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app import crawl_manager
+from app import competitor_ops, crawl_manager
 from app.config import settings
 from app.db import SessionLocal
 from app.routers import changes, competitors, own_site, schedule, ui
@@ -23,6 +23,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         crawl_manager.release_stale_crawls(db)
+        competitor_ops.ensure_own_site(db)
     finally:
         db.close()
 
