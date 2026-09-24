@@ -4,6 +4,7 @@ import logging
 
 import httpx
 
+from app.ai.analyze import AiAnalysisResult
 from app.ai.compare import ComparisonResult
 from app.config import settings
 from app.crawler.diff import ChangeType, PageDiff
@@ -75,6 +76,22 @@ def format_comparison_summary(
         lines.append("")
         lines.append(f"Ещё сравнений: {remaining} — смотрите в отчёте.")
 
+    return "\n".join(lines)
+
+
+def format_important_summary(items: list[tuple[str, AiAnalysisResult]], limit: int = 5) -> str:
+    """Блок «🔥 Важное» в итоговом сообщении — ради него сообщение и читают."""
+    lines = ["🔥 Важное:"]
+    for url, analysis in items[:limit]:
+        lines.append("")
+        lines.append(analysis.summary or url)
+        if analysis.importance_reason:
+            lines.append(f"Почему важно: {analysis.importance_reason}")
+        lines.append(url)
+    remaining = len(items) - limit
+    if remaining > 0:
+        lines.append("")
+        lines.append(f"Ещё важных находок: {remaining} — в отчёте они первые.")
     return "\n".join(lines)
 
 

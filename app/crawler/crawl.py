@@ -290,6 +290,80 @@ async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str]:
         await page.close()
 
 
+async def _fetch_all(
+    context: BrowserContext,
+    urls: list[str],
+    *,
+    cache_lookup: CacheLookup | None,
+    cache_store: CacheStore | None,
+) -> dict[str, tuple[str, str] | None]:
+    """Грузит страницы в crawl_page_concurrency вкладок разом. url -> (title, text),
+    None — страницу не удалось загрузить (таймаут, обрыв сети).
+
+    Раньше страницы шли строго по одной, и первый обход сайта на тысячи страниц
+    занимал сутки. Каждая вкладка после своей загрузки выдерживает паузу
+    crawl_request_delay_seconds — вежливость к сайту сохраняется на вкладку.
+
+    CompetitorBlockedError в любой вкладке останавливает все остальные и уходит
+    наверх — это сигнал прекратить весь обход, а не сбой одной страницы.
+    """
+    results: dict[str, tuple[str, str] | None] = {}
+    queue: asyncio.Queue[str] = asyncio.Queue()
+    for url in urls:
+        queue.put_nowait(url)
+
+    # Хуки черновика ходят в одну Session БД через asyncio.to_thread — из нескольких
+    # вкладок разом это были бы параллельные потоки на одной сессии. Сами операции
+    # быстрые, поэтому просто выстраиваем их в очередь.
+    cache_lock = asyncio.Lock()
+
+    async def _one(url: str) -> None:
+        if cache_lookup:
+            async with cache_lock:
+                cached = await cache_lookup(url)
+            if cached is not None:
+                results[url] = cached
+                return
+        try:
+            title, text = await fetch_page_text(context, url)
+        except CompetitorBlockedError:
+            raise
+        except Exception:
+            # Таймаут/обрыв на одной странице не должен рушить весь обход (см.
+            # CLAUDE.md про инкрементальный обход и историю с og1.ru: одна
+            # зависшая страница валила весь прогон целиком).
+            logger.warning("Не удалось загрузить страницу %s — пропускаем в этом обходе", url, exc_info=True)
+            results[url] = None
+            return
+        results[url] = (title, text)
+        if cache_store:
+            async with cache_lock:
+                await cache_store(url, title, text)
+        await asyncio.sleep(settings.crawl_request_delay_seconds)
+
+    async def _worker() -> None:
+        while True:
+            try:
+                url = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            await _one(url)
+
+    workers = [
+        asyncio.create_task(_worker()) for _ in range(max(1, min(settings.crawl_page_concurrency, len(urls))))
+    ]
+    try:
+        await asyncio.gather(*workers)
+    except BaseException:
+        # gather не отменяет соседей сам: без этого остальные вкладки продолжили бы
+        # ходить по сайту, который нас уже заблокировал (или обход уже остановили).
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+    return results
+
+
 async def crawl_competitor(
     context: BrowserContext,
     base_url: str,
@@ -336,30 +410,21 @@ async def crawl_competitor(
     result = CrawlResult(base_url=base_url, urls_total=urls_total)
     result.pages.update(carry_over)
 
+    fetched = await _fetch_all(
+        context, to_fetch, cache_lookup=cache_lookup, cache_store=cache_store
+    )
+
+    # Складываем в порядке to_fetch, а не в порядке, в каком вкладки закончили:
+    # результат обхода не должен зависеть от того, какая страница загрузилась быстрее.
     for url in to_fetch:
-        cached = await cache_lookup(url) if cache_lookup else None
-        if cached is not None:
-            title, text = cached
-        else:
-            try:
-                title, text = await fetch_page_text(context, url)
-            except CompetitorBlockedError:
-                raise  # это не сбой одной страницы, а сигнал остановить весь обход
-            except Exception:
-                # Таймаут/обрыв на одной странице не должен рушить весь обход (см.
-                # CLAUDE.md про инкрементальный обход и историю с og1.ru: одна
-                # зависшая страница валила весь прогон целиком).
-                logger.warning("Не удалось загрузить страницу %s — пропускаем в этом обходе", url, exc_info=True)
-                result.failed_urls.append(url)
-                previous = previous_pages.get(url)
-                if previous is not None:
-                    result.pages[url] = previous.text  # считаем неизменной, перепроверим в следующий раз
-                continue
-
-            if cache_store:
-                await cache_store(url, title, text)
-            await asyncio.sleep(settings.crawl_request_delay_seconds)
-
+        page = fetched[url]
+        if page is None:
+            result.failed_urls.append(url)
+            previous = previous_pages.get(url)
+            if previous is not None:
+                result.pages[url] = previous.text  # считаем неизменной, перепроверим в следующий раз
+            continue
+        title, text = page
         result.pages[url] = text
         result.page_titles[url] = title
 

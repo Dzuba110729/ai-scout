@@ -58,6 +58,13 @@ _CHANGE_TYPE_LABELS = {
 
 _MOVED_LABEL = "Страница переехала"
 
+# Вторая строка в колонке «Тип изменения». Для «средне» пометки нет — чтобы
+# глаз цеплялся только за важное и за то, что можно пропустить.
+_IMPORTANCE_LABELS = {
+    "high": "🔥 Важно",
+    "low": "Мелочь",
+}
+
 # Доля ширины таблицы на каждую колонку (сумма = 1.0), в порядке _HEADER.
 # Без этого Google Docs делит таблицу на равные колонки, и текстовые поля
 # (УТП, описание) становятся нечитаемо узкими рядом с короткими (Дата, Категория) —
@@ -100,10 +107,17 @@ def build_row(
     summary_parts = [(analysis.summary if analysis else "") or ""]
     if redirect_summary:
         summary_parts.append(f"Теперь там: {redirect_summary}")
+    if analysis and analysis.importance == "high" and analysis.importance_reason:
+        summary_parts.append(f"Почему важно: {analysis.importance_reason}")
+
+    type_cell = _MOVED_LABEL if redirect_to else _CHANGE_TYPE_LABELS[page_diff.change_type]
+    importance_label = _IMPORTANCE_LABELS.get(analysis.importance) if analysis else None
+    if importance_label:
+        type_cell = f"{type_cell}\n{importance_label}"
 
     return [
         detected_at.strftime("%Y-%m-%d\n%H:%M"),
-        _MOVED_LABEL if redirect_to else _CHANGE_TYPE_LABELS[page_diff.change_type],
+        type_cell,
         page_diff.url,
         (analysis.category if analysis else "") or "",
         (analysis.usp if analysis else "") or "",

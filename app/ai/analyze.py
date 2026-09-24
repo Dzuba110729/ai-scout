@@ -30,6 +30,47 @@ class AiAnalysisResult:
     cta: str | None
     summary: str | None
     raw_response: dict
+    importance: str | None = None  # high / medium / low, см. normalize_importance
+    importance_reason: str | None = None
+
+
+IMPORTANCE_LEVELS = ("high", "medium", "low")
+
+_IMPORTANCE_ALIASES = {
+    "high": "high",
+    "высокая": "high",
+    "важно": "high",
+    "medium": "medium",
+    "средняя": "medium",
+    "средне": "medium",
+    "low": "low",
+    "низкая": "low",
+    "мелочь": "low",
+}
+
+# Что считать важным — отдельной константой, чтобы критерии было легко найти и
+# поправить под себя, не копаясь в тексте промпта.
+IMPORTANCE_CRITERIA = (
+    "Оценка важности для отдела маркетинга (importance):\n"
+    "- high: цены, скидки, акции, новый продукт/курс/тариф/направление, новый оффер или лендинг\n"
+    "  под рекламу, смена УТП или гарантий, удаление продукта или целого направления;\n"
+    "- medium: заметная переработка текста/структуры продающей страницы, новые отзывы/кейсы,\n"
+    "  новые преподаватели, новая статья по ключевой для школы теме;\n"
+    "- low: мелкие правки текста, даты, опечатки, служебные и юридические страницы, блог\n"
+    "  на второстепенную тему, технические изменения без смысла для клиента.\n"
+)
+
+
+def normalize_importance(value: object) -> str | None:
+    """Ответ модели -> high/medium/low. Всё непонятное — None (считается «средне»)."""
+    if not isinstance(value, str):
+        return None
+    return _IMPORTANCE_ALIASES.get(value.strip().lower())
+
+
+def importance_rank(importance: str | None) -> int:
+    """Ключ сортировки «важное сначала». Без оценки — как «средне»."""
+    return {"high": 0, "medium": 1, "low": 2}.get(importance or "medium", 1)
 
 
 def build_prompt(page_diff: PageDiff) -> str:
@@ -53,12 +94,15 @@ def build_prompt(page_diff: PageDiff) -> str:
         "```\n"
         f"{content}\n"
         "```\n\n"
+        f"{IMPORTANCE_CRITERIA}\n"
         "Верни СТРОГО один JSON-объект (без пояснений вне JSON) со следующими полями:\n"
         '{\n'
         '  "category": "тип страницы: лендинг/оффер/цены/статья/другое",\n'
         '  "usp": "ключевое УТП или выгода, если есть, иначе null",\n'
         '  "cta": "текст призыва к действию, если есть, иначе null",\n'
-        '  "summary": "1-2 предложения о сути изменения на русском"\n'
+        '  "summary": "1-2 предложения о сути изменения на русском",\n'
+        '  "importance": "high | medium | low",\n'
+        '  "importance_reason": "одно короткое предложение: почему такая важность"\n'
         '}\n'
     )
 
@@ -81,6 +125,8 @@ def parse_ai_response(raw_text: str) -> AiAnalysisResult:
         cta=data.get("cta"),
         summary=data.get("summary"),
         raw_response=data,
+        importance=normalize_importance(data.get("importance")),
+        importance_reason=data.get("importance_reason"),
     )
 
 

@@ -192,6 +192,10 @@ class AiAnalysis(Base):
     usp: Mapped[str | None] = mapped_column(Text, nullable=True)
     cta: Mapped[str | None] = mapped_column(Text, nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Насколько находка важна для маркетинга: high / medium / low (см. app.ai.analyze).
+    # null — разбор сделан до появления оценки; считается «средне».
+    importance: Mapped[str | None] = mapped_column(Text, nullable=True)
+    importance_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

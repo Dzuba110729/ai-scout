@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 HISTORY_TURNS = 6
 CONTEXT_CHANGES_LIMIT = 40
 
-SECTIONS = ("summary", "competitors", "changes", "reports", "settings", "help", "own_site")
+SECTIONS = ("summary", "competitors", "changes", "reports", "digest", "settings", "help", "own_site")
 CHANGE_KINDS = tuple(bot_views.CHANGE_KINDS)
 
 # Действие -> обязательные аргументы. Всё, чего здесь нет, код бота не выполнит.
@@ -74,8 +74,12 @@ SYSTEM_PROMPT = """Ты — помощник в Telegram-боте «AI-Скау�
 - set_schedule {days, hours} — интервал плановых обходов, например раз в неделю: days=7, hours=0;
 - show {section, competitor_id?, kind?} — показать раздел с кнопками. section: summary (сводка),
   competitors (список или карточка конкурента, если указан competitor_id), changes (лента находок;
-  kind: all|new|changed|removed; можно competitor_id), reports (ссылки на отчёты), settings, help,
-  own_site. Используй show, когда человек хочет «посмотреть/открыть/показать» список, отчёт и т.п.
+  kind: all|important|new|changed|removed; можно competitor_id), reports (ссылки на отчёты),
+  digest (дайджест за неделю), settings, help, own_site. Используй show, когда человек хочет
+  «посмотреть/открыть/показать» список, отчёт, дайджест и т.п.
+
+Находки с пометкой 🔥 ИИ оценил как важные (цены, акции, новые продукты и офферы) — на вопросы
+«что важного», «что главное» отвечай прежде всего по ним.
 
 Правила:
 - конкурента определяй по названию или адресу из списка в «Данных» и передавай его id;

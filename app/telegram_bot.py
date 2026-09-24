@@ -39,7 +39,7 @@ from aiogram.types import (
     TelegramObject,
 )
 
-from app import bot_views, competitor_ops, crawl_manager
+from app import bot_views, competitor_ops, crawl_manager, digest
 from app.ai import assistant
 from app.ai.assistant import AssistantAction, ClaudeCliError
 from app.config import settings
@@ -78,6 +78,7 @@ BOT_COMMANDS = [
     BotCommand(command="summary", description="Сводка"),
     BotCommand(command="competitors", description="Конкуренты"),
     BotCommand(command="changes", description="Последние находки"),
+    BotCommand(command="digest", description="Дайджест за неделю"),
     BotCommand(command="reports", description="Отчёты об обходах"),
     BotCommand(command="settings", description="Расписание и подключения"),
     BotCommand(command="help", description="Что умеет бот"),
@@ -104,7 +105,11 @@ HELP_TEXT = """❓ Что умеет бот
 — 🌐 Наш сайт: адрес и обход нашего сайта (с ним сравниваются находки)
 — ⚙️ Настройки: как часто обходить, что подключено
 
-После каждого обхода бот сам пришлёт итог и кнопку «📄 Открыть отчёт».
+После каждого обхода бот сам пришлёт итог, 🔥 важные находки и кнопку «📄 Открыть отчёт».
+Раз в неделю — дайджест: главное за неделю, чего нет у нас, что требует внимания.
+Его можно запросить и сейчас: /digest или кнопка в «📊 Сводке».
+
+🔥 — находки, которые ИИ счёл важными: цены, акции, новые продукты и офферы.
 
 Можно писать обычным языком, например:
 — «что нового у фоксфорда за неделю?»
@@ -113,6 +118,7 @@ HELP_TEXT = """❓ Что умеет бот
 — «поставь умскул на паузу»
 — «обходи всех раз в 3 дня»
 — «какие цены поменялись?»
+— «что важного за неделю?»
 
 /start — вернуть меню, если оно пропало."""
 
@@ -188,7 +194,8 @@ async def _show(
 def _summary_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
     return bot_views.summary_text(db), _kb(
         [
-            [_btn("🆕 Находки за неделю", "chg:all:all:1"), _btn("📄 Отчёты", "sec:reports")],
+            [_btn("🔥 Важные находки", "chg:all:important:1"), _btn("🆕 Все находки", "chg:all:all:1")],
+            [_btn("🗞 Дайджест за неделю", "sec:digest"), _btn("📄 Отчёты", "sec:reports")],
             [_btn("🔄 Обновить", "sec:summary")],
         ]
     )
@@ -244,12 +251,14 @@ def _changes_screen(db, scope: str, kind: str, page: int) -> tuple[str, InlineKe
         head, *blocks = text.split("\n\n")
         text = "\n\n".join([head, *(f"{i}. {block}" for i, block in enumerate(blocks, start=1))])
 
+    filters = [
+        _btn(("• " if k == kind else "") + label, f"chg:{scope}:{k}:1")
+        for k, label in bot_views.CHANGE_KIND_LABELS.items()
+    ]
     rows = [
         [_btn(str(i), f"chd:{c.id}:{scope}:{kind}:{result.page}") for i, c in enumerate(result.items, start=1)],
-        [
-            _btn(("• " if k == kind else "") + label, f"chg:{scope}:{k}:1")
-            for k, label in bot_views.CHANGE_KIND_LABELS.items()
-        ],
+        filters[:2],
+        filters[2:],
     ]
     nav = []
     if result.page > 1:
@@ -269,6 +278,8 @@ def _change_detail_screen(db, change: PageChange, back: str) -> tuple[str, Inlin
     lines = [bot_views.change_line(change, summary_limit=1000)]
     analysis = change.ai_analysis
     if analysis:
+        if analysis.importance == "high" and analysis.importance_reason:
+            lines.append(f"🔥 Почему важно: {analysis.importance_reason}")
         if analysis.category:
             lines.append(f"Тип страницы: {analysis.category}")
         if analysis.usp:
@@ -338,7 +349,8 @@ def _own_site_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
 
 def _settings_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
     presets = [_btn(label, f"set:{days}:{hours}") for label, days, hours in SCHEDULE_PRESETS]
-    return bot_views.settings_text(db), _kb([presets[:2], presets[2:], [_btn("🔄 Обновить", "sec:settings")]])
+    text = bot_views.settings_text(db) + f"\n\nДайджест: {digest.schedule_label()} (меняется в .env: DIGEST_*)"
+    return text, _kb([presets[:2], presets[2:], [_btn("🔄 Обновить", "sec:settings")]])
 
 
 SECTION_SCREENS = {
@@ -357,12 +369,31 @@ async def _show_section(target: Message | CallbackQuery, section: str, *, new_me
     if section == "changes":
         await _show_changes(target, "all", "all", 1, new_message=new_message)
         return
+    if section == "digest":
+        await _show_digest(target)
+        return
     db = SessionLocal()
     try:
         text, markup = SECTION_SCREENS.get(section, _summary_screen)(db)
     finally:
         db.close()
     await _show(target, text, markup, new_message=new_message)
+
+
+async def _show_digest(target: Message | CallbackQuery) -> None:
+    """Дайджест собирается с абзацем от ИИ (секунды) — показываем, что думаем,
+    и отвечаем новым сообщением: его удобно переслать коллегам."""
+    message = target.message if isinstance(target, CallbackQuery) else target
+    if message is None:
+        return
+    placeholder = await message.answer("🗞 Собираю дайджест…")
+    db = SessionLocal()
+    try:
+        result = await digest.make_digest(db)
+    finally:
+        db.close()
+    markup = InlineKeyboardMarkup(inline_keyboard=result.buttons) if result.buttons else None
+    await placeholder.edit_text(result.text, reply_markup=markup, disable_web_page_preview=True)
 
 
 async def _show_competitor(target: Message | CallbackQuery, competitor_id: int, *, new_message: bool = False) -> None:
@@ -509,6 +540,7 @@ _COMMAND_SECTIONS = {
     "summary": "summary",
     "competitors": "competitors",
     "changes": "changes",
+    "digest": "digest",
     "reports": "reports",
     "settings": "settings",
     "help": "help",

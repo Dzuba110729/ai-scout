@@ -39,6 +39,49 @@ window.navigator.permissions.query = (parameters) => (
 """
 
 
+# Что не нужно, чтобы достать текст страницы. Картинки/шрифты/видео — просто лишний
+# трафик. Счётчики и виджеты хуже: они держат сеть «шумной», и ожидание networkidle
+# в fetch_page_text упиралось в свой таймаут почти на каждой странице (замер на
+# og1.ru: ~16 с загрузки на страницу). Сайт конкурента и его собственные скрипты
+# (в том числе антибот-проверки) не трогаем — режем только чужие домены из списка.
+_BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+_BLOCKED_URL_PARTS = (
+    "mc.yandex.",
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "googleadservices.com",
+    "top-fwz1.mail.ru",
+    "vk.com/rtrg",
+    "connect.facebook.net",
+    "facebook.com/tr",
+    "jivosite.com",
+    "jivo.ru",
+    "carrotquest.",
+    "roistat.com",
+    "calltouch.ru",
+    "callibri.ru",
+    "comagic.ru",
+    "uiscom.ru",
+    "hotjar.com",
+    "clarity.ms",
+)
+
+
+def is_blocked_request(resource_type: str, url: str) -> bool:
+    if resource_type in _BLOCKED_RESOURCE_TYPES:
+        return True
+    return any(part in url for part in _BLOCKED_URL_PARTS)
+
+
+async def _block_heavy_requests(route) -> None:
+    request = route.request
+    if is_blocked_request(request.resource_type, request.url):
+        await route.abort()
+    else:
+        await route.continue_()
+
+
 def storage_state_path_for(competitor_id: int, storage_state_dir: Path) -> Path:
     return storage_state_dir / f"competitor_{competitor_id}.json"
 
@@ -65,8 +108,14 @@ async def new_stealth_context(
     browser: Browser,
     *,
     storage_state_path: Path | None = None,
+    block_heavy_resources: bool = False,
 ):
-    """Контекст браузера с реалистичным UA/viewport и (опционально) сохранённой сессией."""
+    """Контекст браузера с реалистичным UA/viewport и (опционально) сохранённой сессией.
+
+    block_heavy_resources — для фонового обхода: не грузить картинки, шрифты,
+    счётчики и виджеты (см. _BLOCKED_URL_PARTS). В ручном headed-прогоне не нужен:
+    там человек смотрит на страницу.
+    """
     storage_state = str(storage_state_path) if storage_state_path and storage_state_path.exists() else None
 
     context: BrowserContext = await browser.new_context(
@@ -77,6 +126,8 @@ async def new_stealth_context(
         storage_state=storage_state,
     )
     await context.add_init_script(STEALTH_INIT_SCRIPT)
+    if block_heavy_resources:
+        await context.route("**/*", _block_heavy_requests)
     try:
         yield context
     finally:

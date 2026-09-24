@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.config import settings
 from app.models import (
+    AiAnalysis,
     ChangeType,
     Competitor,
     Page,
@@ -41,9 +42,11 @@ CHANGE_EMOJI = {
     ChangeType.REMOVED: "🗑",
 }
 
-# Фильтр ленты в callback_data -> тип изменения (None — все).
+# Фильтр ленты в callback_data -> тип изменения (None — все; «important» — не тип,
+# а оценка важности от ИИ, обрабатывается в load_changes отдельно).
 CHANGE_KINDS: dict[str, ChangeType | None] = {
     "all": None,
+    "important": None,
     "new": ChangeType.NEW,
     "changed": ChangeType.CHANGED,
     "removed": ChangeType.REMOVED,
@@ -51,10 +54,13 @@ CHANGE_KINDS: dict[str, ChangeType | None] = {
 
 CHANGE_KIND_LABELS = {
     "all": "Все",
+    "important": "🔥 Важные",
     "new": "🆕 Новые",
     "changed": "✏️ Изменения",
     "removed": "🗑 Удалённые",
 }
+
+IMPORTANT_MARK = "🔥"
 
 
 def fmt_dt(value: datetime | None, empty: str = "—") -> str:
@@ -158,6 +164,9 @@ def summary_text(db: Session) -> str:
 
         lines.append("")
         lines.append(f"Находки за 7 дней: {_counts_line(_change_counts(db, now - timedelta(days=7)))}")
+        important = load_changes(db, kind="important", since=now - timedelta(days=7), page_size=1).total
+        if important:
+            lines.append(f"{IMPORTANT_MARK} Из них важных: {important}")
         lines.append(f"Находки за 30 дней: {_counts_line(_change_counts(db, now - timedelta(days=30)))}")
 
         upcoming = [c.next_crawl_at for c in competitors if c.next_crawl_at and not c.is_paused]
@@ -237,19 +246,21 @@ def load_changes(
     change_type = CHANGE_KINDS.get(kind)
     if change_type is not None:
         conditions.append(PageChange.change_type == change_type)
+    if kind == "important":
+        conditions.append(AiAnalysis.importance == "high")
     if since is not None:
         conditions.append(PageChange.detected_at >= since)
 
-    total = db.scalar(select(func.count(PageChange.id)).join(Page).join(Competitor).where(*conditions)) or 0
+    def _base(stmt):
+        return stmt.join(Page).join(Competitor).outerjoin(AiAnalysis).where(*conditions)
+
+    total = db.scalar(_base(select(func.count(PageChange.id)).select_from(PageChange))) or 0
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(max(page, 1), total_pages)
 
     items = (
         db.execute(
-            select(PageChange)
-            .join(Page)
-            .join(Competitor)
-            .where(*conditions)
+            _base(select(PageChange))
             .options(
                 joinedload(PageChange.page).joinedload(Page.competitor),
                 joinedload(PageChange.ai_analysis),
@@ -265,9 +276,15 @@ def load_changes(
     return ChangesPage(items=list(items), page=page, total_pages=total_pages, total=total)
 
 
+def is_important(change: PageChange) -> bool:
+    return bool(change.ai_analysis and change.ai_analysis.importance == "high")
+
+
 def change_line(change: PageChange, *, with_competitor: bool = True, summary_limit: int = 220) -> str:
     page = change.page
     head = CHANGE_EMOJI[change.change_type]
+    if is_important(change):
+        head = f"{IMPORTANT_MARK}{head}"
     if with_competitor:
         head += f" {page.competitor.name}"
     head += f" · {fmt_dt(change.detected_at)}"

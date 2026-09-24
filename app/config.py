@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     # ничего не поменялось — не все сайты честно обновляют дату, это подстраховка.
     crawl_full_recheck_days: int = 30
 
+    # Сколько страниц ОДНОГО сайта грузим одновременно (вкладки одного браузера).
+    # Раньше строго по одной — первый обход сайта на 3000 страниц шёл больше суток.
+    # Пауза crawl_request_delay_seconds соблюдается в каждой вкладке, так что сайт
+    # видит примерно crawl_page_concurrency запросов за паузу. Если конкурент
+    # начинает блокировать — уменьшить до 1–2.
+    crawl_page_concurrency: int = 4
+
+    # Не грузить при обходе картинки, шрифты, видео, счётчики и виджеты чатов —
+    # на текст страницы не влияют, а загрузку тормозят в разы (app/crawler/browser.py).
+    crawl_block_heavy_resources: bool = True
+
     # Сколько конкурентов обходим одновременно. Каждый обход поднимает свой
     # браузер, поэтому без потолка десять конкурентов съедят всю память сервера.
     crawl_concurrency: int = 3
@@ -88,6 +99,14 @@ class Settings(BaseSettings):
     own_site_compare_max_per_run: int = 10
     own_site_compare_candidates: int = 3
     own_site_compare_text_limit: int = 3000
+
+    # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
+    # часовому поясу Мака, на котором крутится сервис. digest_days — за сколько дней
+    # собирать находки.
+    digest_enabled: bool = True
+    digest_day_of_week: str = "mon"
+    digest_hour: int = 10
+    digest_days: int = 7
 
     log_level: str = "INFO"
 

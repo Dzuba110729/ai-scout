@@ -99,6 +99,8 @@ async def backfill_missing_analyses(
                 usp=analysis.usp,
                 cta=analysis.cta,
                 summary=analysis.summary,
+                importance=analysis.importance,
+                importance_reason=analysis.importance_reason,
                 raw_response=analysis.raw_response,
             )
         )

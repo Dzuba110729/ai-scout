@@ -13,9 +13,11 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import crawl_manager
+from app.config import settings
 from app.db import SessionLocal
 from app.models import Competitor, ScheduleConfig
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 _JOB_PREFIX = "crawl_competitor_"
+DIGEST_JOB_ID = "weekly_digest"
 
 
 def _job_id(competitor_id: int) -> str:
@@ -127,11 +130,30 @@ def set_interval(db, days: int, hours: int) -> ScheduleConfig:
     return config
 
 
+async def _run_digest() -> None:
+    # Импорт здесь, а не наверху: app.digest тянет bot_views, а тот — этот модуль.
+    from app.digest import send_weekly_digest
+
+    await send_weekly_digest()
+
+
+def schedule_digest() -> None:
+    if not settings.digest_enabled:
+        return
+    scheduler.add_job(
+        _run_digest,
+        trigger=CronTrigger(day_of_week=settings.digest_day_of_week, hour=settings.digest_hour),
+        id=DIGEST_JOB_ID,
+        replace_existing=True,
+    )
+
+
 def start_scheduler() -> None:
     db = SessionLocal()
     try:
         reschedule_all(db)
     finally:
         db.close()
+    schedule_digest()
     scheduler.start()
     logger.info("Планировщик запущен")

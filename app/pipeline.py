@@ -19,6 +19,7 @@ from app.ai.analyze import (
     AiAnalysisResult,
     ClaudeCliError,
     analyze_page_change,
+    importance_rank,
     parse_ai_response,
     run_claude_cli,
 )
@@ -62,6 +63,7 @@ from app.notifications.telegram import (
     format_comparison_summary,
     format_error_message,
     format_finished_message,
+    format_important_summary,
     format_started_message,
     report_buttons,
 )
@@ -286,7 +288,9 @@ async def _crawl_competitor(
             async_playwright() as playwright,
             launch_browser(playwright, headless=True) as browser,
             new_stealth_context(
-                browser, storage_state_path=storage_state_path if has_session else None
+                browser,
+                storage_state_path=storage_state_path if has_session else None,
+                block_heavy_resources=settings.crawl_block_heavy_resources,
             ) as context,
         ):
             return await crawl_competitor(
@@ -398,24 +402,32 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             )
         )
 
-        report_rows: list[list[str]] = []
+        ranked_rows: list[tuple[int, list[str]]] = []
         comparisons: list[tuple[str, ComparisonResult]] = []
+        important: list[tuple[str, AiAnalysisResult]] = []
         for (page_diff, page, _page_change, moved), analysis, comparison in zip(
             prepared, analyses, comparisons_by_item, strict=True
         ):
             if comparison:
                 comparisons.append((page_diff.url, comparison))
+            if analysis and analysis.importance == "high":
+                important.append((page_diff.url, analysis))
 
-            report_rows.append(
-                build_row(
-                    page_diff,
-                    analysis,
-                    run_at,
-                    redirect_to=moved,
-                    redirect_summary=page.redirect_target_summary if moved else None,
-                    comparison=comparison,
+            ranked_rows.append(
+                (
+                    importance_rank(analysis.importance if analysis else None),
+                    build_row(
+                        page_diff,
+                        analysis,
+                        run_at,
+                        redirect_to=moved,
+                        redirect_summary=page.redirect_target_summary if moved else None,
+                        comparison=comparison,
+                    ),
                 )
             )
+        # Важное — в начало отчёта; внутри одной важности порядок прежний (sort стабилен).
+        report_rows = [row for _rank, row in sorted(ranked_rows, key=lambda item: item[0])]
 
         if competitor.status != SessionStatus.ACTIVE:
             competitor.status = SessionStatus.ACTIVE
@@ -449,6 +461,8 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         await asyncio.to_thread(db.commit)
 
         message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
+        if important:
+            message_parts.append(format_important_summary(important))
         if notes:
             message_parts.append("\n".join(notes))
         if comparisons:
@@ -798,6 +812,8 @@ async def _analyze_and_store(
             usp=analysis.usp,
             cta=analysis.cta,
             summary=analysis.summary,
+            importance=analysis.importance,
+            importance_reason=analysis.importance_reason,
             raw_response=analysis.raw_response,
         )
     )
