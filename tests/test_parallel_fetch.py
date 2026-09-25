@@ -17,7 +17,7 @@ def _fast(monkeypatch):
 
 
 def _patch_discovery(monkeypatch, urls):
-    async def fake_discover(base_url):
+    async def fake_discover(base_url, sitemap_url=None):
         return [SitemapEntry(url=u, lastmod=None) for u in urls]
 
     monkeypatch.setattr(crawl_module, "discover_sitemap_entries", fake_discover)

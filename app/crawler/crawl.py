@@ -9,11 +9,12 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from urllib.parse import urldefrag, urljoin, urlparse
 from xml.etree import ElementTree
 
 import httpx
-from patchright.async_api import BrowserContext
+from patchright.async_api import BrowserContext, Page, Response
 
 from app.config import settings
 from app.crawler.blocking import blocked_reason, is_blocked
@@ -83,6 +84,18 @@ class SitemapEntry:
     lastmod: datetime | None  # дата обновления страницы по данным sitemap, если есть
 
 
+# Файлы, а не страницы: браузер их скачивает вместо показа, текста для сравнения
+# не получается (у skysmart.ru в карте сайта сотни PDF с вариантами ВПР).
+_FILE_EXTENSIONS = (
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip", ".rar",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".mp4", ".mp3",
+)
+
+
+def _is_file_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(_FILE_EXTENSIONS)
+
+
 def _parse_lastmod(text: str | None) -> datetime | None:
     if not text:
         return None
@@ -104,48 +117,118 @@ def _url_entries(root: ElementTree.Element) -> list[tuple[str, str | None]]:
     return entries
 
 
-async def discover_sitemap_entries(base_url: str) -> list[SitemapEntry]:
-    """Все адреса сайта из sitemap.xml, с датой обновления страницы (если сайт её даёт).
+async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
+    try:
+        response = await client.get(url)
+    except httpx.HTTPError:
+        return None
+    return response if response.status_code == 200 else None
+
+
+async def _parse_sitemap(client: httpx.AsyncClient, content: bytes) -> list[tuple[str, str | None]] | None:
+    """Адреса из XML карты сайта (обычной или sitemap index). None — это не XML."""
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return None
+    # Аккуратная HTML-страница тоже бывает корректным XML — это не карта сайта.
+    if root.tag.rsplit("}", 1)[-1] not in ("urlset", "sitemapindex"):
+        return None
+
+    # sitemap index — верхнеуровневый файл со ссылками на другие sitemap'ы
+    sitemap_locs = [loc.text for loc in root.findall(".//sm:sitemap/sm:loc", _SITEMAP_NS) if loc.text]
+    if not sitemap_locs:
+        return _url_entries(root)
+
+    entries: list[tuple[str, str | None]] = []
+    for loc in sitemap_locs[:_MAX_SITEMAP_INDEX_FILES]:
+        try:
+            sub_response = await client.get(loc)
+            sub_root = ElementTree.fromstring(sub_response.content)
+        except (httpx.HTTPError, ElementTree.ParseError):
+            continue
+        entries.extend(_url_entries(sub_root))
+    return entries
+
+
+async def _read_sitemap(client: httpx.AsyncClient, url: str) -> list[tuple[str, str | None]] | None:
+    """Адреса из одного файла карты сайта. None — по этому адресу карты сайта нет
+    (ошибка, не XML — например, редирект на главную)."""
+    response = await _get(client, url)
+    return await _parse_sitemap(client, response.content) if response else None
+
+
+async def _sitemaps_from_robots(client: httpx.AsyncClient, base_url: str) -> list[str]:
+    """Адреса карт сайта из строк «Sitemap:» в robots.txt."""
+    try:
+        response = await client.get(urljoin(base_url, "/robots.txt"))
+    except httpx.HTTPError:
+        return []
+    if response.status_code != 200:
+        return []
+    locs: list[str] = []
+    for line in response.text.splitlines():
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "sitemap" and value.strip():
+            locs.append(value.strip())
+    return locs
+
+
+class _LinkCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "a":
+            href = dict(attrs).get("href")
+            if href:
+                self.hrefs.append(href)
+
+
+async def _read_custom_sitemap(client: httpx.AsyncClient, url: str) -> list[tuple[str, str | None]]:
+    """Карта сайта по адресу, заданному вручную: XML-карта или HTML-страница со ссылками
+    (у HTML-карты дат обновления нет)."""
+    response = await _get(client, url)
+    if response is None:
+        return []
+    xml_entries = await _parse_sitemap(client, response.content)
+    if xml_entries is not None:
+        return xml_entries
+    collector = _LinkCollector()
+    collector.feed(response.text)
+    base = str(response.url)
+    return [(urljoin(base, href), None) for href in collector.hrefs]
+
+
+async def discover_sitemap_entries(base_url: str, sitemap_url: str | None = None) -> list[SitemapEntry]:
+    """Все адреса сайта из карты сайта, с датой обновления страницы (если сайт её даёт).
+
+    Если у конкурента указан свой адрес карты сайта (sitemap_url) — только он: XML-карта
+    или HTML-страница со ссылками. Иначе сначала /sitemap.xml; если там карты нет — карты, перечисленные в robots.txt
+    (так у skysmart.ru: /sitemap.xml редиректит на главную, а настоящие карты лежат
+    по другим адресам — раньше из-за этого сайт шёл медленным обходом по ссылкам).
 
     Без обрезки лимитом страниц — карта сайта читается целиком (см. _MAX_SITEMAP_INDEX_FILES
     про единственный потолок, и то чисто защитный). Какие из этих адресов реально нужно
     загрузить с сайта, решает plan_crawl — отдельно и позже.
     """
-    sitemap_url = urljoin(base_url, "/sitemap.xml")
     raw_entries: list[tuple[str, str | None]] = []
 
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        try:
-            response = await client.get(sitemap_url)
-        except httpx.HTTPError:
-            return []
-
-        if response.status_code != 200:
-            return []
-
-        try:
-            root = ElementTree.fromstring(response.content)
-        except ElementTree.ParseError:
-            return []
-
-        # sitemap index — верхнеуровневый файл со ссылками на другие sitemap'ы
-        sitemap_locs = [loc.text for loc in root.findall(".//sm:sitemap/sm:loc", _SITEMAP_NS) if loc.text]
-        if sitemap_locs:
-            for loc in sitemap_locs[:_MAX_SITEMAP_INDEX_FILES]:
-                try:
-                    sub_response = await client.get(loc)
-                    sub_root = ElementTree.fromstring(sub_response.content)
-                except (httpx.HTTPError, ElementTree.ParseError):
-                    continue
-                raw_entries.extend(_url_entries(sub_root))
+        if sitemap_url:
+            raw_entries = await _read_custom_sitemap(client, sitemap_url)
+        elif main := await _read_sitemap(client, urljoin(base_url, "/sitemap.xml")):
+            raw_entries = main
         else:
-            raw_entries = _url_entries(root)
+            for loc in (await _sitemaps_from_robots(client, base_url))[:_MAX_SITEMAP_INDEX_FILES]:
+                raw_entries.extend(await _read_sitemap(client, loc) or [])
 
     base_netloc = urlparse(base_url).netloc
     deduped: dict[str, datetime | None] = {}
     for url, lastmod_text in raw_entries:
         normalized = normalize_url(url)
-        if _same_domain(normalized, base_netloc):
+        if _same_domain(normalized, base_netloc) and not _is_file_url(normalized):
             deduped[normalized] = _parse_lastmod(lastmod_text)
 
     # Сортировка обязательна: дальше по этому списку срезают лимит на то, сколько
@@ -190,28 +273,36 @@ def plan_crawl(
     ни в carry_over — этого достаточно, чтобы diff_crawl отдельно классифицировал
     её как removed (см. app.crawler.diff).
     """
-    candidates: list[str] = []
+    # Кандидаты по очереди важности — лимит срезает хвост, а не голову:
+    # 0 — совсем новые адреса (главное, ради чего бот существует),
+    # 1 — страницы, у которых дата в карте сайта стала новее (точно менялись),
+    # 2 — страницы без даты (перепроверка «на всякий случай»). Раньше все шли одним
+    # списком по алфавиту, и на сайте с тысячами недатированных статей (skysmart.ru)
+    # новая страница могла неделями не попадать в лимит.
+    candidates: list[tuple[int, str]] = []
     carry_over: dict[str, str] = {}
 
     for entry in entries:
         previous = previous_pages.get(entry.url)
         if force_full or previous is None:
-            candidates.append(entry.url)
-            continue
-        if entry.lastmod is None or previous.lastmod is None or entry.lastmod > previous.lastmod:
-            candidates.append(entry.url)
+            candidates.append((0, entry.url))
+        elif entry.lastmod is not None and previous.lastmod is not None and entry.lastmod > previous.lastmod:
+            candidates.append((1, entry.url))
+        elif entry.lastmod is None or previous.lastmod is None:
+            candidates.append((2, entry.url))
         else:
             carry_over[entry.url] = previous.text
 
-    to_fetch = sorted(candidates)[: max(0, max_fetch)]
+    to_fetch = [url for _priority, url in sorted(candidates)[: max(0, max_fetch)]]
 
     # Кандидаты сверх лимита за этот прогон не потеряны и не "удалены" — просто
     # переносим прежний текст, а по-настоящему изменившееся содержимое подхватит
     # один из следующих обходов (дата у них в карте сайта всё ещё новее сохранённой).
     # Для совсем новых адресов (previous_pages о них не знает) переносить нечего —
     # они появятся, когда до них дойдёт очередь.
-    for url in candidates:
-        if url not in to_fetch and url in previous_pages:
+    fetch_set = set(to_fetch)
+    for _priority, url in candidates:
+        if url not in fetch_set and url in previous_pages:
             carry_over[url] = previous_pages[url].text
 
     return CrawlPlan(
@@ -220,6 +311,48 @@ def plan_crawl(
         live_urls={entry.url for entry in entries},
         urls_total=len(entries),
     )
+
+
+async def _goto_through_challenge(page: Page, url: str) -> tuple[int, str] | None:
+    """Открывает url и возвращает (HTTP-статус, html). None — страница не ответила.
+
+    Часть антибот-защит (например, у onlineschool-1.ru) отдаёт сперва 503 с JS-проверкой
+    «вы не робот», которая за пару секунд сама проходит и перезагружает страницу уже
+    с кодом 200. Раньше такой первый 503 сразу считался блокировкой, и обход уходил в
+    Apify. Теперь, если первый ответ похож на блокировку, ждём до
+    crawl_challenge_wait_seconds, не придёт ли следом нормальная загрузка страницы.
+    Куки от пройденной проверки остаются в контексте — следующие страницы грузятся сразу.
+    """
+    main_frame_statuses: list[int] = []
+
+    def _on_response(response: Response) -> None:
+        if response.frame == page.main_frame and response.request.is_navigation_request():
+            main_frame_statuses.append(response.status)
+
+    page.on("response", _on_response)
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        if response is None:
+            return None
+        status = response.status
+        html = await page.content()
+        if is_blocked(status, html):
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + settings.crawl_challenge_wait_seconds
+            while loop.time() < deadline:
+                await asyncio.sleep(1)
+                if main_frame_statuses and main_frame_statuses[-1] != status:
+                    status = main_frame_statuses[-1]
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:  # noqa: BLE001 — дочитаем то, что успело загрузиться
+                        pass
+                    html = await page.content()
+                    if not is_blocked(status, html):
+                        break
+        return status, html
+    finally:
+        page.remove_listener("response", _on_response)
 
 
 async def discover_urls_by_crawling(
@@ -239,17 +372,17 @@ async def discover_urls_by_crawling(
         while queue and len(discovered) < max_pages:
             url = queue.pop(0)
             try:
-                response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                loaded = await _goto_through_challenge(page, url)
             except Exception:  # noqa: BLE001 — сетевые сбои одной страницы не должны рушить весь обход
                 logger.warning("Не удалось открыть %s при обходе ссылок", url)
                 continue
 
-            if response is None:
+            if loaded is None:
                 continue
 
-            html = await page.content()
-            if is_blocked(response.status, html):
-                raise CompetitorBlockedError(url, blocked_reason(response.status, html) or "неизвестно")
+            status, html = loaded
+            if is_blocked(status, html):
+                raise CompetitorBlockedError(url, blocked_reason(status, html) or "неизвестно")
 
             discovered.append(url)
 
@@ -271,7 +404,7 @@ async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str]:
     """Открывает страницу и возвращает (заголовок, нормализованный текст). Бросает CompetitorBlockedError."""
     page = await context.new_page()
     try:
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        loaded = await _goto_through_challenge(page, url)
         try:
             # SPA (React/Vue) дорисовывают контент после domcontentloaded — ждём
             # затихания сети, чтобы не забрать пустой каркас страницы.
@@ -279,7 +412,7 @@ async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str]:
         except Exception:  # noqa: BLE001 — страницы с фоновым polling/аналитикой никогда не затихают, это не ошибка
             pass
         html = await page.content()
-        status = response.status if response else 0
+        status = loaded[0] if loaded else 0
 
         if is_blocked(status, html):
             raise CompetitorBlockedError(url, blocked_reason(status, html) or "неизвестно")
@@ -374,6 +507,7 @@ async def crawl_competitor(
     cache_lookup: CacheLookup | None = None,
     cache_store: CacheStore | None = None,
     on_urls_discovered: OnUrlsDiscovered | None = None,
+    sitemap_url: str | None = None,
 ) -> CrawlResult:
     """Обход одного конкурента: находим URL и рендерим только те страницы, которые
     реально нужно (см. plan_crawl) — остальные переносим из прошлого снимка.
@@ -386,7 +520,7 @@ async def crawl_competitor(
     чтобы снова идти на сайт конкурента. Без них (по умолчанию) поведение прежнее.
     """
     previous_pages = previous_pages or {}
-    entries = await discover_sitemap_entries(base_url)
+    entries = await discover_sitemap_entries(base_url, sitemap_url)
 
     sitemap_lastmod_by_url: dict[str, datetime | None] = {}
     if entries:

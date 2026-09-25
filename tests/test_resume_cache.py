@@ -12,7 +12,7 @@ from app.crawler.crawl import SitemapEntry, crawl_competitor
 
 
 def _patch_discovery(monkeypatch, urls: list[str]) -> None:
-    async def fake_discover(base_url):
+    async def fake_discover(base_url, sitemap_url=None):
         return [SitemapEntry(url=u, lastmod=None) for u in urls]
 
     monkeypatch.setattr(crawl_module, "discover_sitemap_entries", fake_discover)

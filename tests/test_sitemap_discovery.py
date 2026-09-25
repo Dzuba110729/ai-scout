@@ -106,6 +106,105 @@ async def test_no_sitemap_returns_empty_list(monkeypatch):
     assert await discover_sitemap_entries("https://x.ru") == []
 
 
+
+@pytest.mark.asyncio
+async def test_falls_back_to_sitemaps_listed_in_robots_txt(monkeypatch):
+    # Как у skysmart.ru: /sitemap.xml редиректит на главную (HTML, не XML).
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/sitemap.xml":
+            return httpx.Response(200, text="<!DOCTYPE html><html><body>главная</body></html>")
+        if path == "/robots.txt":
+            return httpx.Response(
+                200, text="User-agent: *\nSitemap: https://x.ru/a.xml\nsitemap:https://x.ru/b.xml\n"
+            )
+        if path == "/a.xml":
+            return httpx.Response(200, text=_urlset([("https://x.ru/p1", None)]))
+        if path == "/b.xml":
+            return httpx.Response(200, text=_urlset([("https://x.ru/p2", "2026-05-01")]))
+        return httpx.Response(404)
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru")
+
+    assert [e.url for e in entries] == ["https://x.ru/p1", "https://x.ru/p2"]
+
+
+@pytest.mark.asyncio
+async def test_robots_txt_is_ignored_when_sitemap_xml_works(monkeypatch):
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/sitemap.xml":
+            return httpx.Response(200, text=_urlset([("https://x.ru/p1", None)]))
+        return httpx.Response(200, text="Sitemap: https://x.ru/other.xml")
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru")
+
+    assert [e.url for e in entries] == ["https://x.ru/p1"]
+    assert "/robots.txt" not in requested
+
+
+@pytest.mark.asyncio
+async def test_files_like_pdf_are_not_treated_as_pages(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=_urlset([("https://x.ru/page", None), ("https://x.ru/files/Вариант%201.PDF", None)]),
+        )
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru")
+
+    assert [e.url for e in entries] == ["https://x.ru/page"]
+
+
+@pytest.mark.asyncio
+async def test_custom_html_sitemap_page_gives_its_same_site_links(monkeypatch):
+    # Как у skysmart.ru/sitemap: обычная страница со ссылками, а не XML.
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/sitemap":
+            return httpx.Response(
+                200,
+                text=(
+                    '<html><body><a href="/courses">Курсы</a> <a href="price#top">Цены</a>'
+                    '<a href="https://other.ru/x">чужой</a><a href="https://x.ru/courses">дубль</a>'
+                    "</body></html>"
+                ),
+            )
+        return httpx.Response(404)
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru", sitemap_url="https://x.ru/sitemap")
+
+    assert [e.url for e in entries] == ["https://x.ru/courses", "https://x.ru/price"]
+    assert all(e.lastmod is None for e in entries)
+    assert requested == ["/sitemap"]  # стандартные места не трогаем, раз адрес задан
+
+
+@pytest.mark.asyncio
+async def test_custom_sitemap_url_can_be_xml(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/maps/main.xml":
+            return httpx.Response(200, text=_urlset([("https://x.ru/p1", "2026-05-01")]))
+        return httpx.Response(404)
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru", sitemap_url="https://x.ru/maps/main.xml")
+
+    assert [e.url for e in entries] == ["https://x.ru/p1"]
+    assert entries[0].lastmod is not None
+
 def test_crawl_result_knows_it_saw_only_part_of_the_site():
     truncated = CrawlResult(base_url="https://x.ru", pages={"https://x.ru/a": "т"}, urls_total=500)
     complete = CrawlResult(base_url="https://x.ru", pages={"https://x.ru/a": "т"}, urls_total=1)

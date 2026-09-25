@@ -19,7 +19,7 @@ NEW = datetime(2026, 6, 1, tzinfo=UTC)
 
 
 def _patch_discovery(monkeypatch, entries: list[SitemapEntry]) -> None:
-    async def fake_discover(base_url):
+    async def fake_discover(base_url, sitemap_url=None):
         return entries
 
     monkeypatch.setattr(crawl_module, "discover_sitemap_entries", fake_discover)

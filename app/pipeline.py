@@ -306,6 +306,7 @@ async def _crawl_competitor(
                 cache_lookup=_fetch_cache_lookup(db, competitor.id),
                 cache_store=_fetch_cache_store(db, competitor.id),
                 on_urls_discovered=_on_urls_discovered(db, competitor.id),
+                sitemap_url=competitor.sitemap_url,
             )
     except CompetitorBlockedError:
         if not settings.apify_api_token:

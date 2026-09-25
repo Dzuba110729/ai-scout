@@ -112,3 +112,20 @@ def test_urls_total_counts_the_whole_sitemap():
     plan = plan_crawl(entries, previous_pages={}, force_full=True, max_fetch=100)
 
     assert plan.urls_total == 3
+
+
+def test_new_pages_go_first_then_redated_then_undated_under_the_limit():
+    # Как у skysmart.ru: тысячи недатированных статей не должны вытеснять из лимита
+    # совсем новые страницы и страницы с обновлённой датой.
+    undated = [SitemapEntry(url=f"https://x.ru/a{i}", lastmod=None) for i in range(5)]
+    redated = SitemapEntry(url="https://x.ru/z-redated", lastmod=NEW)
+    brand_new = SitemapEntry(url="https://x.ru/zz-new", lastmod=None)
+    previous = {e.url: PreviousPageInfo(text="было", lastmod=None) for e in undated}
+    previous[redated.url] = PreviousPageInfo(text="было", lastmod=OLD)
+
+    plan = plan_crawl(
+        [*undated, redated, brand_new], previous_pages=previous, force_full=False, max_fetch=3
+    )
+
+    assert plan.to_fetch == ["https://x.ru/zz-new", "https://x.ru/z-redated", "https://x.ru/a0"]
+    assert set(plan.carry_over) == {f"https://x.ru/a{i}" for i in range(1, 5)}
