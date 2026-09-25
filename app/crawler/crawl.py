@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import gzip
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -126,10 +127,20 @@ async def _get(client: httpx.AsyncClient, url: str) -> httpx.Response | None:
     return response if response.status_code == 200 else None
 
 
+def _maybe_gunzip(content: bytes) -> bytes:
+    """Карты сайта часто лежат сжатыми (sitemap.xml.gz, как у foxford.ru)."""
+    if content[:2] == b"\x1f\x8b":
+        try:
+            return gzip.decompress(content)
+        except (OSError, EOFError):
+            return b""
+    return content
+
+
 async def _parse_sitemap(client: httpx.AsyncClient, content: bytes) -> list[tuple[str, str | None]] | None:
     """Адреса из XML карты сайта (обычной или sitemap index). None — это не XML."""
     try:
-        root = ElementTree.fromstring(content)
+        root = ElementTree.fromstring(_maybe_gunzip(content))
     except ElementTree.ParseError:
         return None
     # Аккуратная HTML-страница тоже бывает корректным XML — это не карта сайта.
@@ -145,8 +156,8 @@ async def _parse_sitemap(client: httpx.AsyncClient, content: bytes) -> list[tupl
     for loc in sitemap_locs[:_MAX_SITEMAP_INDEX_FILES]:
         try:
             sub_response = await client.get(loc)
-            sub_root = ElementTree.fromstring(sub_response.content)
-        except (httpx.HTTPError, ElementTree.ParseError):
+            sub_root = ElementTree.fromstring(_maybe_gunzip(sub_response.content))
+        except (httpx.HTTPError, ElementTree.ParseError, OSError, EOFError):
             continue
         entries.extend(_url_entries(sub_root))
     return entries

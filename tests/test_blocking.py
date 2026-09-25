@@ -40,3 +40,10 @@ def test_large_real_page_mentioning_captcha_config_is_not_blocked():
     assert len(html) > 20_000
     assert is_blocked(200, html) is False
     assert blocked_reason(200, html) is None
+
+
+def test_qrator_401_challenge_is_blocked():
+    # Qrator (foxford.ru) отвечает 401 и пустой страницей в пару сотен байт.
+    html = "<html><head><title>HTTP 403</title></head><body></body></html>"
+    assert is_blocked(401, html)
+    assert blocked_reason(401, html) == "HTTP 401"

@@ -7,7 +7,9 @@
 
 import re
 
-BLOCKED_STATUS_CODES = {403, 429, 503}
+# 401 — так отвечает Qrator (foxford.ru, skysmart.ru) на JS-проверку: пустая страница
+# в 274 байта. Без этого пустой текст сохранялся бы как нормальная страница.
+BLOCKED_STATUS_CODES = {401, 403, 429, 503}
 
 _CHALLENGE_MARKERS = (
     "checking your browser",

@@ -276,3 +276,27 @@ async def test_html_sitemap_links_lose_advertising_tags(monkeypatch):
     entries = await discover_sitemap_entries("https://x.ru", sitemap_url="https://x.ru/karta")
 
     assert [e.url for e in entries] == ["https://x.ru/art", "https://x.ru/catalog?page=2"]
+
+
+@pytest.mark.asyncio
+async def test_reads_gzipped_sitemaps_from_robots_txt(monkeypatch):
+    # Как у foxford.ru: в robots.txt — sitemap.xml.gz, внутри — снова .gz-файлы.
+    import gzip
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/robots.txt":
+            return httpx.Response(200, text="Sitemap: https://x.ru/downloads/sitemap.xml.gz")
+        if path == "/downloads/sitemap.xml.gz":
+            index = _sitemap_index(["https://x.ru/downloads/part1.xml.gz"])
+            return httpx.Response(200, content=gzip.compress(index.encode()))
+        if path == "/downloads/part1.xml.gz":
+            urlset = _urlset([("https://x.ru/courses", "2026-09-25")])
+            return httpx.Response(200, content=gzip.compress(urlset.encode()))
+        return httpx.Response(404)
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru/")
+
+    assert [e.url for e in entries] == ["https://x.ru/courses"]
