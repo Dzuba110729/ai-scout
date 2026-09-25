@@ -13,9 +13,11 @@
 платный Anthropic API в проекте не используется (см. CLAUDE.md).
 """
 
+import asyncio
 import logging
 import math
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass
 
@@ -129,16 +131,45 @@ def _term_counts(title: str | None, text: str) -> Counter:
     return counts
 
 
-def _cosine(left: dict[str, float], right: dict[str, float]) -> float:
-    left_norm = math.sqrt(sum(value * value for value in left.values()))
-    right_norm = math.sqrt(sum(value * value for value in right.values()))
-    if not left_norm or not right_norm:
-        return 0.0
+@dataclass(frozen=True)
+class _OwnSiteIndex:
+    """Наш сайт, уже разобранный на слова: веса слов и векторы страниц."""
 
-    # Перебираем меньший словарь: у страниц конкурента и наших размеры сильно разные.
-    smaller, larger = (left, right) if len(left) <= len(right) else (right, left)
-    dot = sum(value * larger.get(token, 0.0) for token, value in smaller.items())
-    return dot / (left_norm * right_norm)
+    idf: dict[str, float]
+    vectors: list[dict[str, float]]
+    norms: list[float]
+
+
+# Разбор всего нашего сайта (тысячи страниц) — самая тяжёлая часть подбора. Раньше он
+# повторялся для КАЖДОЙ страницы конкурента: 50 сравнений первого обхода = 50 разборов
+# og1.ru подряд, и сервис на ~10 минут переставал отвечать (обходы, Telegram, веб).
+# Теперь разбор один на список наших страниц; lock — чтобы параллельные потоки не
+# строили его одновременно.
+_index_lock = threading.Lock()
+_cached_index: tuple[list[OwnPage], _OwnSiteIndex] | None = None
+
+
+def _own_site_index(own_pages: list[OwnPage]) -> _OwnSiteIndex:
+    global _cached_index
+    with _index_lock:
+        if _cached_index is not None and _cached_index[0] is own_pages:
+            return _cached_index[1]
+
+        documents = [_term_counts(page.title, page.text) for page in own_pages]
+        document_frequency: Counter = Counter()
+        for document in documents:
+            document_frequency.update(document.keys())
+
+        total = len(documents)
+        idf = {
+            token: math.log((total + 1) / (freq + 1)) + 1.0
+            for token, freq in document_frequency.items()
+        }
+        vectors = [{token: count * idf[token] for token, count in document.items()} for document in documents]
+        norms = [math.sqrt(sum(value * value for value in vector.values())) for vector in vectors]
+        index = _OwnSiteIndex(idf=idf, vectors=vectors, norms=norms)
+        _cached_index = (own_pages, index)
+        return index
 
 
 def find_similar_pages(
@@ -153,32 +184,24 @@ def find_similar_pages(
     if not own_pages or limit <= 0:
         return []
 
-    documents = [_term_counts(page.title, page.text) for page in own_pages]
-
-    document_frequency: Counter = Counter()
-    for document in documents:
-        document_frequency.update(document.keys())
-
-    total = len(documents)
-    idf = {
-        token: math.log((total + 1) / (freq + 1)) + 1.0
-        for token, freq in document_frequency.items()
-    }
+    index = _own_site_index(own_pages)
 
     query_counts = _term_counts(title, text)
     # Слова, которых нет ни на одной нашей странице, в сравнении не участвуют.
     query_vector = {
-        token: count * idf[token] for token, count in query_counts.items() if token in idf
+        token: count * index.idf[token] for token, count in query_counts.items() if token in index.idf
     }
-    if not query_vector:
+    query_norm = math.sqrt(sum(value * value for value in query_vector.values()))
+    if not query_norm:
         return []
 
     scored: list[SimilarPage] = []
-    for page, document in zip(own_pages, documents, strict=True):
-        vector = {token: count * idf[token] for token, count in document.items()}
-        score = _cosine(query_vector, vector)
-        if score > 0:
-            scored.append(SimilarPage(page=page, score=score))
+    for page, vector, norm in zip(own_pages, index.vectors, index.norms, strict=True):
+        if not norm:
+            continue
+        dot = sum(value * vector.get(token, 0.0) for token, value in query_vector.items())
+        if dot > 0:
+            scored.append(SimilarPage(page=page, score=dot / (query_norm * norm)))
 
     # url в ключе сортировки — чтобы порядок был одинаковым при равных оценках.
     scored.sort(key=lambda item: (-item.score, item.page.url))
@@ -274,8 +297,10 @@ async def compare_with_own_site(page_diff: PageDiff, own_site: OwnSite) -> Compa
     if not competitor_text or not own_site.pages:
         return None
 
-    candidates = find_similar_pages(
-        None, competitor_text, own_site.pages, limit=settings.own_site_compare_candidates
+    # В отдельном потоке: подбор — чистая работа процессора, и в общем event loop он
+    # замораживал бы все обходы, бота и веб, пока считается.
+    candidates = await asyncio.to_thread(
+        find_similar_pages, None, competitor_text, own_site.pages, settings.own_site_compare_candidates
     )
     if not candidates:
         # Ни одного общего значимого слова со всем нашим сайтом — тратить вызов ИИ
