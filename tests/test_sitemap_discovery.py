@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.crawler import crawl as crawl_module
-from app.crawler.crawl import CrawlResult, discover_sitemap_entries
+from app.crawler.crawl import CrawlResult, discover_sitemap_entries, find_sitemap_page_link
 
 
 def _patch_client(monkeypatch, handler) -> None:
@@ -211,3 +211,68 @@ def test_crawl_result_knows_it_saw_only_part_of_the_site():
 
     assert truncated.is_truncated is True
     assert complete.is_truncated is False
+
+
+def test_finds_sitemap_link_in_footer_by_its_text():
+    html = (
+        '<header><a href="/courses">Курсы</a></header>'
+        '<footer><a href="/o-nas">О нас</a> <a href="/map-page"><span>Карта</span>\n <b>сайта</b></a></footer>'
+    )
+
+    assert find_sitemap_page_link(html, "https://x.ru/") == "https://x.ru/map-page"
+
+
+def test_link_text_wins_over_a_similar_looking_address():
+    html = '<a href="/sitemap.xml">XML</a><a href="https://x.ru/karta">Карта сайта</a>'
+
+    assert find_sitemap_page_link(html, "https://x.ru/") == "https://x.ru/karta"
+
+
+def test_falls_back_to_link_address_when_text_is_an_icon():
+    html = '<nav><a href="/about">О нас</a><a href="/karta-sajta/"><img alt=""></a></nav>'
+
+    assert find_sitemap_page_link(html, "https://x.ru/") == "https://x.ru/karta-sajta/"
+
+
+def test_sitemap_link_to_another_site_is_ignored():
+    html = '<a href="https://other.ru/sitemap">Карта сайта</a>'
+
+    assert find_sitemap_page_link(html, "https://x.ru/") is None
+
+
+@pytest.mark.asyncio
+async def test_without_xml_maps_takes_pages_from_sitemap_link_on_home_page(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/":
+            return httpx.Response(200, text='<footer><a href="/karta">Карта сайта</a></footer>')
+        if path == "/karta":
+            return httpx.Response(200, text='<a href="/courses">Курсы</a><a href="/price">Цены</a>')
+        if path == "/robots.txt":
+            return httpx.Response(200, text="User-agent: *\nDisallow:")
+        return httpx.Response(404)
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru/")
+
+    assert [e.url for e in entries] == ["https://x.ru/courses", "https://x.ru/price"]
+
+
+@pytest.mark.asyncio
+async def test_html_sitemap_links_lose_advertising_tags(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                '<a href="/art/?_gl=1*abc*_ga*MTE3">Искусство</a>'
+                '<a href="/art/?utm_source=menu">Искусство</a>'
+                '<a href="/catalog?page=2&utm_medium=x">Каталог</a>'
+            ),
+        )
+
+    _patch_client(monkeypatch, handler)
+
+    entries = await discover_sitemap_entries("https://x.ru", sitemap_url="https://x.ru/karta")
+
+    assert [e.url for e in entries] == ["https://x.ru/art", "https://x.ru/catalog?page=2"]

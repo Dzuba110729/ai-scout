@@ -6,11 +6,12 @@
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urldefrag, urljoin, urlparse
+from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlparse, urlunparse
 from xml.etree import ElementTree
 
 import httpx
@@ -175,15 +176,89 @@ async def _sitemaps_from_robots(client: httpx.AsyncClient, base_url: str) -> lis
 
 
 class _LinkCollector(HTMLParser):
+    """Все ссылки страницы: (href, видимый текст ссылки)."""
+
     def __init__(self) -> None:
         super().__init__()
-        self.hrefs: list[str] = []
+        self.links: list[tuple[str, str]] = []
+        self._href: str | None = None
+        self._text: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag == "a":
-            href = dict(attrs).get("href")
-            if href:
-                self.hrefs.append(href)
+            self._close_link()
+            self._href = dict(attrs).get("href")
+            self._text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a":
+            self._close_link()
+
+    def close(self) -> None:
+        super().close()
+        self._close_link()
+
+    def _close_link(self) -> None:
+        if self._href:
+            self.links.append((self._href, " ".join("".join(self._text).split())))
+        self._href = None
+        self._text = []
+
+
+def _page_links(html: str) -> list[tuple[str, str]]:
+    collector = _LinkCollector()
+    collector.feed(html)
+    collector.close()
+    return collector.links
+
+
+_TRACKING_PARAM_PREFIXES = ("utm_", "_gl", "_ga", "gclid", "yclid", "fbclid", "_openstat")
+
+
+def _strip_tracking_params(url: str) -> str:
+    """Рекламные метки в ссылках (?_gl=…, ?utm_source=…) у одной и той же страницы
+    разные — без чистки одна страница выглядела бы как несколько."""
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    kept = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith(_TRACKING_PARAM_PREFIXES)
+    ]
+    return urlunparse(parsed._replace(query=urlencode(kept)))
+
+
+def _links_as_entries(html: str, page_url: str) -> list[tuple[str, str | None]]:
+    """Ссылки HTML-страницы «карта сайта» как адреса карты (дат обновления у неё нет)."""
+    return [(_strip_tracking_params(urljoin(page_url, href)), None) for href, _text in _page_links(html)]
+
+
+_SITEMAP_LINK_TEXT_RE = re.compile(r"карта\s+сайта|site\s*map", re.IGNORECASE)
+_SITEMAP_LINK_HREF_RE = re.compile(r"sitemap|site-map|karta[-_]?sa[ijy]{0,2}ta", re.IGNORECASE)
+
+
+def find_sitemap_page_link(html: str, page_url: str) -> str | None:
+    """Ссылка «Карта сайта» из меню в шапке/подвале страницы — сначала по тексту ссылки,
+    потом по адресу (…/sitemap, …/karta-sajta). Только на тот же сайт."""
+    netloc = urlparse(page_url).netloc
+    candidates = [
+        (urljoin(page_url, href), text)
+        for href, text in _page_links(html)
+        if not href.startswith(("#", "mailto:", "tel:", "javascript:"))
+    ]
+    candidates = [(url, text) for url, text in candidates if urlparse(url).netloc == netloc]
+    for url, text in candidates:
+        if _SITEMAP_LINK_TEXT_RE.search(text):
+            return url
+    for url, _text in candidates:
+        if _SITEMAP_LINK_HREF_RE.search(urlparse(url).path):
+            return url
+    return None
 
 
 async def _read_custom_sitemap(client: httpx.AsyncClient, url: str) -> list[tuple[str, str | None]]:
@@ -195,10 +270,7 @@ async def _read_custom_sitemap(client: httpx.AsyncClient, url: str) -> list[tupl
     xml_entries = await _parse_sitemap(client, response.content)
     if xml_entries is not None:
         return xml_entries
-    collector = _LinkCollector()
-    collector.feed(response.text)
-    base = str(response.url)
-    return [(urljoin(base, href), None) for href in collector.hrefs]
+    return _links_as_entries(response.text, str(response.url))
 
 
 async def discover_sitemap_entries(base_url: str, sitemap_url: str | None = None) -> list[SitemapEntry]:
@@ -223,7 +295,19 @@ async def discover_sitemap_entries(base_url: str, sitemap_url: str | None = None
         else:
             for loc in (await _sitemaps_from_robots(client, base_url))[:_MAX_SITEMAP_INDEX_FILES]:
                 raw_entries.extend(await _read_sitemap(client, loc) or [])
+            if not raw_entries:
+                # Последний шанс без браузера: ссылка «Карта сайта» в меню главной.
+                # Если главная закрыта антибот-проверкой, то же самое через браузер
+                # делает crawl_competitor (_sitemap_page_via_browser).
+                home = await _get(client, base_url)
+                link = find_sitemap_page_link(home.text, str(home.url)) if home else None
+                if link:
+                    raw_entries = await _read_custom_sitemap(client, link)
 
+    return _to_entries(raw_entries, base_url)
+
+
+def _to_entries(raw_entries: list[tuple[str, str | None]], base_url: str) -> list[SitemapEntry]:
     base_netloc = urlparse(base_url).netloc
     deduped: dict[str, datetime | None] = {}
     for url, lastmod_text in raw_entries:
@@ -497,6 +581,28 @@ async def _fetch_all(
     return results
 
 
+async def _sitemap_page_via_browser(context: BrowserContext, base_url: str) -> list[SitemapEntry]:
+    """Ссылка «Карта сайта» в меню главной и список страниц с неё — через браузер,
+    для сайтов, где простой запрос упирается в проверку «вы не робот»."""
+    page = await context.new_page()
+    try:
+        loaded = await _goto_through_challenge(page, base_url)
+        if loaded is None or is_blocked(*loaded):
+            return []
+        link = find_sitemap_page_link(loaded[1], page.url)
+        if not link:
+            return []
+        loaded = await _goto_through_challenge(page, link)
+        if loaded is None or is_blocked(*loaded):
+            return []
+        return _to_entries(_links_as_entries(loaded[1], page.url), base_url)
+    except Exception:  # noqa: BLE001 — не вышло, значит обычный обход по ссылкам
+        logger.warning("Не удалось найти карту сайта через браузер на %s", base_url, exc_info=True)
+        return []
+    finally:
+        await page.close()
+
+
 async def crawl_competitor(
     context: BrowserContext,
     base_url: str,
@@ -524,6 +630,14 @@ async def crawl_competitor(
 
     sitemap_lastmod_by_url: dict[str, datetime | None] = {}
     if entries:
+        plan = plan_crawl(entries, previous_pages=previous_pages, force_full=force_full, max_fetch=max_pages)
+        to_fetch = plan.to_fetch
+        carry_over = plan.carry_over
+        urls_total = plan.urls_total
+        sitemap_lastmod_by_url = {entry.url: entry.lastmod for entry in entries}
+    elif not sitemap_url and (entries := await _sitemap_page_via_browser(context, base_url)):
+        # Главная закрыта от простого запроса антибот-проверкой, но в браузере нашлась
+        # ссылка «Карта сайта» — дальше как с обычной картой.
         plan = plan_crawl(entries, previous_pages=previous_pages, force_full=force_full, max_fetch=max_pages)
         to_fetch = plan.to_fetch
         carry_over = plan.carry_over
