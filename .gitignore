@@ -9,3 +9,8 @@ google_oauth_token.json
 .pytest_cache/
 .ruff_cache/
 logs/
+
+# Выгрузки кук из браузера (Cookie-Editor) — вход на сайты конкурентов, в git нельзя
+/*cook*.json
+/*cook*.rtf
+/*cook*.txt

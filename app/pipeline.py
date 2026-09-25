@@ -29,7 +29,12 @@ from app.ai.backfill import backfill_missing_analyses
 from app.ai.compare import ComparisonResult, OwnSite, compare_with_own_site
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
-from app.crawler.browser import launch_browser, new_stealth_context, storage_state_path_for
+from app.crawler.browser import (
+    launch_browser,
+    new_stealth_context,
+    save_storage_state,
+    storage_state_path_for,
+)
 from app.crawler.crawl import (
     CacheLookup,
     CacheStore,
@@ -38,6 +43,7 @@ from app.crawler.crawl import (
     OnUrlsDiscovered,
     PreviousPageInfo,
     crawl_competitor,
+    parse_include_paths,
 )
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
@@ -299,7 +305,7 @@ async def _crawl_competitor(
                 block_heavy_resources=settings.crawl_block_heavy_resources,
             ) as context,
         ):
-            return await crawl_competitor(
+            result = await crawl_competitor(
                 context,
                 competitor.base_url,
                 max_pages=max_pages,
@@ -309,9 +315,18 @@ async def _crawl_competitor(
                 cache_store=_fetch_cache_store(db, competitor.id),
                 on_urls_discovered=_on_urls_discovered(db, competitor.id),
                 sitemap_url=competitor.sitemap_url,
+                include_paths=parse_include_paths(competitor.include_paths),
             )
+            if has_session:
+                # Защита могла выдать за время обхода свежие куки — сохраняем их,
+                # чтобы следующий обход не начинал с просроченных.
+                await save_storage_state(context, storage_state_path)
+            return result
     except CompetitorBlockedError:
-        if not settings.apify_api_token:
+        # С сессией из кук Apify бесполезен: блокировка значит, что куки протухли,
+        # а платный прогон по защищённому сайту их не заменит (foxford.ru: 10/10
+        # прогонов Apify заблокированы). Нужны свежие куки от владельца.
+        if not settings.apify_api_token or has_session or competitor.cookies_only:
             raise
         logger.info(
             "Локальный Playwright заблокирован у конкурента %s — пробуем Apify Cloud", competitor.name
@@ -539,7 +554,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         db.add(competitor)
         reason = exc.reason if isinstance(exc, CompetitorBlockedError) else str(exc)
         url = exc.url if isinstance(exc, CompetitorBlockedError) else competitor.base_url
-        message = format_blocked_message(competitor.name, url, reason)
+        message = format_blocked_message(competitor.name, url, reason, cookies_only=competitor.cookies_only)
         await _notify(notifier, db, competitor, message, page_change_id=None)
         db.commit()
         logger.warning("Обход конкурента %s не удался: %s", competitor.name, exc)

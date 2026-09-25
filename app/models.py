@@ -8,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -93,6 +94,17 @@ class Competitor(Base):
     # ~1500 нужных страниц вместо 28 000 в XML-картах, большая часть которых —
     # однотипные SEO-страницы «курсы в городе N»). null — ищем карту сами.
     sitemap_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Какие разделы сайта обходить — начала адресов через запятую/перевод строки
+    # («/catalog, /courses, /podgotovka-*»). null — весь сайт. У foxford.ru в карте
+    # сайта ~149 тыс. адресов, из них нужных ~3 тыс., остальное — SEO-страницы.
+    include_paths: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Обход только по свежим кукам из обычного Chrome владельца: защита сайта (Qrator
+    # у foxford.ru) пускает бота лишь с ними, а кука защиты живёт ~час. Такой сайт не
+    # попадает в плановый цикл и «Обойти всех», без Apify-фолбэка; обход запускается
+    # сам, когда владелец присылает боту выгрузку кук (app/telegram_bot.py).
+    cookies_only: Mapped[bool] = mapped_column(default=False, server_default=false())
 
     # Документ последнего обхода в Google Docs — чтобы бот мог прислать его в любой
     # момент, а не только в сообщении об окончании обхода.

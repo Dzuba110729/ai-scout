@@ -259,3 +259,22 @@ def test_release_stale_crawls_is_noop_when_nothing_is_stuck():
 
     assert crawl_manager.release_stale_crawls(session) == 0
     assert session.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_start_all_leaves_cookie_only_sites_for_fresh_cookies(monkeypatch):
+    cookie_site = _competitor(1)
+    cookie_site.cookies_only = True
+    normal = _competitor(2)
+    session = _FakeSession([cookie_site, normal])
+
+    async def noop(_db, _competitor):
+        return None
+
+    _install(monkeypatch, session, noop)
+
+    result = crawl_manager.start_all(session)
+    await _drain_background_tasks()
+
+    assert result.started == 1
+    assert result.skipped_cookies_only == 1

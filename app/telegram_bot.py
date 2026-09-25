@@ -42,7 +42,15 @@ from aiogram.types import (
 from app import bot_views, competitor_ops, crawl_manager, digest
 from app.ai import assistant
 from app.ai.assistant import AssistantAction, ClaudeCliError
-from app.config import settings
+from app.config import STORAGE_STATE_DIR, settings
+from app.crawler.browser import storage_state_path_for
+from app.crawler.cookies import (
+    CookieExportError,
+    cookie_domains,
+    parse_cookie_export,
+    site_matches_cookies,
+)
+from app.crawler.cookies import save_storage_state as save_cookie_storage_state
 from app.db import SessionLocal
 from app.models import Competitor, PageChange
 from app.own_site import get_own_site
@@ -121,7 +129,12 @@ HELP_TEXT = """❓ Что умеет бот
 — «что важного за неделю?»
 
 Первый обход любого сайта — точка отсчёта: страницы запоминаются, а изменения
-ловятся со следующего обхода.
+ловятся со следующего обхода. Заодно до 50 ключевых страниц конкурента (курсы, цены)
+сразу сравниваются с нашим сайтом.
+
+🍪 Сайты с жёсткой защитой (foxford.ru) бот обходит только со свежими куками из
+вашего Chrome: откройте сайт → Cookie-Editor → Export → JSON → пришлите файл
+(или вставьте текст) сюда. Бот сам сохранит их, удалит сообщение и начнёт обход.
 
 /start — вернуть меню, если оно пропало."""
 
@@ -437,8 +450,13 @@ def _crawl_all_text(result: crawl_manager.CrawlAllResult) -> str:
         "🔄 Обход всех конкурентов:\n"
         f"запущено — {result.started}\n"
         f"уже шли — {result.skipped_running}\n"
-        f"на паузе — {result.skipped_paused}\n\n"
-        "По каждому пришлю итог и ссылку на отчёт."
+        f"на паузе — {result.skipped_paused}\n"
+        + (
+            f"ждут свежих кук — {result.skipped_cookies_only} (обход запустится, когда пришлёте куки)\n"
+            if result.skipped_cookies_only
+            else ""
+        )
+        + "\nПо каждому пришлю итог и ссылку на отчёт."
     )
 
 
@@ -776,6 +794,78 @@ async def add_url_received(message: Message, state: FSMContext) -> None:
 
 
 # ---------------------------------------------------------------- свободный текст -> ИИ
+
+
+# ---------------------------------------------------------------- куки для защищённых сайтов
+
+_COOKIE_FILE_MAX_BYTES = 512 * 1024
+
+
+def _looks_like_cookie_export(text: str | None) -> bool:
+    return bool(text) and text.lstrip().startswith("[") and '"domain"' in text
+
+
+async def _accept_cookies(message: Message, raw: bytes) -> None:
+    """Выгрузка кук из Cookie-Editor -> сессия конкурента -> сразу обход.
+
+    Сообщение с куками удаляем из чата: это вход на сайт, хранить его в переписке незачем.
+    """
+    try:
+        cookies = parse_cookie_export(raw)
+    except CookieExportError as exc:
+        await message.answer(f"Не принял куки: {exc}.", reply_markup=MAIN_KB)
+        return
+
+    try:
+        await message.delete()
+    except TelegramBadRequest:
+        logger.warning("Не удалось удалить сообщение с куками из чата")
+
+    db = SessionLocal()
+    try:
+        competitor = next(
+            (
+                c
+                for c in db.query(Competitor).filter(Competitor.is_own.is_(False)).order_by(Competitor.id)
+                if site_matches_cookies(c.base_url, cookies)
+            ),
+            None,
+        )
+        if competitor is None:
+            domains = ", ".join(sorted(cookie_domains(cookies)))
+            await message.answer(
+                f"Куки с сайта {domains}, но такого конкурента нет. Сначала добавьте его в «🏢 Конкуренты».",
+                reply_markup=MAIN_KB,
+            )
+            return
+
+        saved = save_cookie_storage_state(cookies, storage_state_path_for(competitor.id, STORAGE_STATE_DIR))
+        logger.info("Приняты куки для конкурента %s: %s шт.", competitor.name, saved)
+        text = f"🍪 Куки для «{competitor.name}» приняты ({saved} шт.), сообщение с ними удалил из чата."
+        if competitor.is_paused:
+            text += "\nКонкурент на паузе — обход не запускаю. Снимите с паузы и нажмите «Обойти сейчас»."
+        elif crawl_manager.start(db, competitor):
+            text += "\n" + _crawl_started_text(competitor.name)
+        else:
+            text += "\nОбход уже идёт — новые куки подхватит следующий."
+        await message.answer(text, reply_markup=_kb([[_btn("Карточка", f"comp:{competitor.id}")]]))
+    finally:
+        db.close()
+
+
+@router.message(StateFilter(None), F.document)
+async def cookies_file_received(message: Message, bot: Bot) -> None:
+    document = message.document
+    if document.file_size and document.file_size > _COOKIE_FILE_MAX_BYTES:
+        await message.answer("Файл слишком большой для выгрузки кук.", reply_markup=MAIN_KB)
+        return
+    content = await bot.download(document)
+    await _accept_cookies(message, content.read())
+
+
+@router.message(StateFilter(None), F.text.func(_looks_like_cookie_export))
+async def cookies_text_received(message: Message) -> None:
+    await _accept_cookies(message, message.text.encode("utf-8"))
 
 
 @router.message(StateFilter(None), F.text)

@@ -592,6 +592,37 @@ async def _fetch_all(
     return results
 
 
+def parse_include_paths(raw: str | None) -> list[str]:
+    """«/catalog, /courses\n/podgotovka-*» -> ["/catalog", "/courses", "/podgotovka-*"]."""
+    if not raw:
+        return []
+    prefixes = []
+    for part in raw.replace(",", " ").split():
+        part = part.strip().lstrip("/")
+        prefixes.append("/" + (part if part.endswith("*") else part.rstrip("/")))
+    return prefixes
+
+
+def path_included(url: str, include_paths: list[str]) -> bool:
+    """Страница входит в выбранные разделы сайта. Пустой список — весь сайт.
+
+    Главная входит всегда. «/courses» — сам раздел и всё внутри (/courses/…), но не
+    /courses-old; «/podgotovka-*» — всё, что начинается с /podgotovka-.
+    """
+    if not include_paths:
+        return True
+    path = urlparse(url).path.rstrip("/") or "/"
+    if path == "/":
+        return True
+    for prefix in include_paths:
+        if prefix.endswith("*"):
+            if path.startswith(prefix[:-1]):
+                return True
+        elif path == prefix or path.startswith(prefix + "/"):
+            return True
+    return False
+
+
 async def _sitemap_page_via_browser(context: BrowserContext, base_url: str) -> list[SitemapEntry]:
     """Ссылка «Карта сайта» в меню главной и список страниц с неё — через браузер,
     для сайтов, где простой запрос упирается в проверку «вы не робот»."""
@@ -625,6 +656,7 @@ async def crawl_competitor(
     cache_store: CacheStore | None = None,
     on_urls_discovered: OnUrlsDiscovered | None = None,
     sitemap_url: str | None = None,
+    include_paths: list[str] | None = None,
 ) -> CrawlResult:
     """Обход одного конкурента: находим URL и рендерим только те страницы, которые
     реально нужно (см. plan_crawl) — остальные переносим из прошлого снимка.
@@ -637,7 +669,12 @@ async def crawl_competitor(
     чтобы снова идти на сайт конкурента. Без них (по умолчанию) поведение прежнее.
     """
     previous_pages = previous_pages or {}
-    entries = await discover_sitemap_entries(base_url, sitemap_url)
+    include_paths = include_paths or []
+    entries = [
+        entry
+        for entry in await discover_sitemap_entries(base_url, sitemap_url)
+        if path_included(entry.url, include_paths)
+    ]
 
     sitemap_lastmod_by_url: dict[str, datetime | None] = {}
     if entries:
@@ -646,7 +683,13 @@ async def crawl_competitor(
         carry_over = plan.carry_over
         urls_total = plan.urls_total
         sitemap_lastmod_by_url = {entry.url: entry.lastmod for entry in entries}
-    elif not sitemap_url and (entries := await _sitemap_page_via_browser(context, base_url)):
+    elif not sitemap_url and (
+        entries := [
+            entry
+            for entry in await _sitemap_page_via_browser(context, base_url)
+            if path_included(entry.url, include_paths)
+        ]
+    ):
         # Главная закрыта от простого запроса антибот-проверкой, но в браузере нашлась
         # ссылка «Карта сайта» — дальше как с обычной картой.
         plan = plan_crawl(entries, previous_pages=previous_pages, force_full=force_full, max_fetch=max_pages)
@@ -657,7 +700,11 @@ async def crawl_competitor(
     else:
         # Sitemap недоступна/пуста — обходим по ссылкам, как раньше. Дат обновления
         # тут никто не даёт, поэтому пропускать нечего: грузим всё в пределах лимита.
-        to_fetch = await discover_urls_by_crawling(context, base_url, max_pages=max_pages)
+        to_fetch = [
+            url
+            for url in await discover_urls_by_crawling(context, base_url, max_pages=max_pages)
+            if path_included(url, include_paths)
+        ]
         carry_over = {}
         # При обходе по ссылкам мы не знаем, сколько страниц у сайта всего: очередь
         # обрывается на лимите. Упёрлись в лимит — значит страниц точно больше.

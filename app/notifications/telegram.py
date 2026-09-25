@@ -29,13 +29,15 @@ def format_change_message(competitor_name: str, page_diff: PageDiff, ai_summary:
     return "\n".join(lines)
 
 
-def format_blocked_message(competitor_name: str, url: str, reason: str) -> str:
-    return (
-        f"⛔ Обход конкурента «{competitor_name}» не удался\n"
-        f"{url}\n"
-        f"Причина: {reason}\n"
-        "Проверьте APIFY_API_TOKEN и лог прогона в Apify Console."
+def format_blocked_message(competitor_name: str, url: str, reason: str, *, cookies_only: bool = False) -> str:
+    hint = (
+        "Куки устарели — защита сайта снова не пускает. Откройте сайт в обычном Chrome, "
+        "выгрузите куки через Cookie-Editor (Export → JSON) и пришлите файл сюда — обход "
+        "запустится сам."
+        if cookies_only
+        else "Проверьте APIFY_API_TOKEN и лог прогона в Apify Console."
     )
+    return f"⛔ Обход конкурента «{competitor_name}» не удался\n{url}\nПричина: {reason}\n{hint}"
 
 
 def format_started_message(competitor_name: str) -> str:

@@ -79,7 +79,7 @@ def _show_next_run(db, next_run: datetime) -> None:
     """next_crawl_at у сайтов — только для показа в UI и боте («следующий обход»):
     у всех, кто не на паузе, это время ближайшего цикла."""
     for competitor in db.query(Competitor).filter(Competitor.is_paused.is_(False)).all():
-        competitor.next_crawl_at = next_run
+        competitor.next_crawl_at = None if competitor.cookies_only else next_run
         db.add(competitor)
 
 

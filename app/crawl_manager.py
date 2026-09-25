@@ -47,6 +47,9 @@ class CrawlAllResult:
     started: int
     skipped_running: int
     skipped_paused: int
+    # Сайты «только по свежим кукам» (Competitor.cookies_only) — их запускает присланная
+    # боту выгрузка кук, а не общая кнопка и не расписание: без свежих кук обход упрётся в защиту.
+    skipped_cookies_only: int = 0
 
 
 def _semaphore() -> asyncio.Semaphore:
@@ -193,10 +196,13 @@ def start_all(db: Session) -> CrawlAllResult:
     started = 0
     skipped_running = 0
     skipped_paused = 0
+    skipped_cookies_only = 0
 
     for competitor in competitors:
         if competitor.is_paused:
             skipped_paused += 1
+        elif competitor.cookies_only:
+            skipped_cookies_only += 1
         elif start(db, competitor):
             started += 1
         else:
@@ -208,7 +214,12 @@ def start_all(db: Session) -> CrawlAllResult:
         skipped_running,
         skipped_paused,
     )
-    return CrawlAllResult(started=started, skipped_running=skipped_running, skipped_paused=skipped_paused)
+    return CrawlAllResult(
+        started=started,
+        skipped_running=skipped_running,
+        skipped_paused=skipped_paused,
+        skipped_cookies_only=skipped_cookies_only,
+    )
 
 
 async def run_now(db: Session, competitor: Competitor) -> bool:

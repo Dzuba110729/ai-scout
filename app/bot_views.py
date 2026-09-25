@@ -192,6 +192,14 @@ def summary_text(db: Session) -> str:
     return "\n".join(lines)
 
 
+def _next_crawl_label(competitor: Competitor) -> str:
+    if competitor.is_paused:
+        return "на паузе"
+    if competitor.cookies_only:
+        return "по свежим кукам — пришлите выгрузку из Cookie-Editor"
+    return fmt_dt(competitor.next_crawl_at)
+
+
 def competitor_card_text(db: Session, competitor: Competitor) -> str:
     now = datetime.now(UTC)
     pages_count = db.scalar(
@@ -210,12 +218,21 @@ def competitor_card_text(db: Session, competitor: Competitor) -> str:
     lines += [
         f"Страниц под наблюдением: {pages_count}",
         f"Последний обход: {fmt_dt(competitor.last_crawl_finished_at, 'ещё не было')}",
-        f"Следующий по расписанию: {'на паузе' if competitor.is_paused else fmt_dt(competitor.next_crawl_at)}",
+        f"Следующий по расписанию: {_next_crawl_label(competitor)}",
         f"Находки за 30 дней: {_counts_line(_change_counts(db, now - timedelta(days=30), competitor.id))}",
     ]
     if competitor.last_report_at:
         lines.append(f"Последний отчёт: {fmt_dt(competitor.last_report_at)}")
-    if competitor.status is SessionStatus.NEEDS_SESSION:
+    if competitor.cookies_only:
+        lines += [
+            "",
+            (
+                "🍪 Сайт пускает бота только со свежими куками из вашего Chrome (живут ~час). "
+                "Откройте сайт в Chrome → Cookie-Editor → Export → JSON → пришлите файл сюда: "
+                "бот сохранит сессию и сразу начнёт обход."
+            ),
+        ]
+    elif competitor.status is SessionStatus.NEEDS_SESSION:
         lines += [
             "",
             (
