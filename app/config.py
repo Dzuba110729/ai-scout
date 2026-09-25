@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     own_site_compare_max_per_run: int = 10
     own_site_compare_candidates: int = 3
     own_site_compare_text_limit: int = 3000
+    # Первый обход конкурента: изменений ещё нет, но сравнить его ключевые страницы
+    # (курсы, цены, разделы — не статьи) с нашим сайтом уже можно. Потолок — чтобы не
+    # упереться в лимиты подписки Claude (решение владельца 2026-09-25: до 50).
+    own_site_baseline_compare_max: int = 50
 
     # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
     # часовому поясу Мака, на котором крутится сервис. digest_days — за сколько дней

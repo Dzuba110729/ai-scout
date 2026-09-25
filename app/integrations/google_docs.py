@@ -98,6 +98,7 @@ def build_row(
     redirect_to: str | None = None,
     redirect_summary: str | None = None,
     comparison: ComparisonResult | None = None,
+    type_label: str | None = None,
 ) -> list[str]:
     """Строка таблицы отчёта.
 
@@ -110,7 +111,7 @@ def build_row(
     if analysis and analysis.importance == "high" and analysis.importance_reason:
         summary_parts.append(f"Почему важно: {analysis.importance_reason}")
 
-    type_cell = _MOVED_LABEL if redirect_to else _CHANGE_TYPE_LABELS[page_diff.change_type]
+    type_cell = type_label or (_MOVED_LABEL if redirect_to else _CHANGE_TYPE_LABELS[page_diff.change_type])
     importance_label = _IMPORTANCE_LABELS.get(analysis.importance) if analysis else None
     if importance_label:
         type_cell = f"{type_cell}\n{importance_label}"

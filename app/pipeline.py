@@ -10,7 +10,9 @@
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 from patchright.async_api import async_playwright
 from sqlalchemy.orm import Session
@@ -374,6 +376,7 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         # лента, забитая мусором. Поэтому первый обход — только точка отсчёта: страницы
         # и их текст сохраняем, находками не считаем.
         is_baseline = not previous_by_url
+        diffs_by_url = {d.url: d for d in diffs}
         prepared: list[tuple[PageDiff, Page, PageChange, str | None]] = []
         for page_diff in diffs:
             page = _apply_page_diff(db, competitor, page_diff, previous_by_url, crawl_result.sitemap_lastmod)
@@ -441,6 +444,17 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
             )
         # Важное — в начало отчёта; внутри одной важности порядок прежний (sort стабилен).
         report_rows = [row for _rank, row in sorted(ranked_rows, key=lambda item: item[0])]
+
+        if is_baseline and own_site:
+            # Изменений в первом обходе нет, но «есть ли у нас такое» спросить уже можно.
+            baseline_comparisons = await _compare_baseline_with_own_site(diffs, own_site, _limited)
+            comparisons.extend(baseline_comparisons)
+            report_rows.extend(
+                build_row(diff, None, run_at, comparison=comparison, type_label=_BASELINE_ROW_LABEL)
+                for diff, comparison in (
+                    (diffs_by_url[url], comparison) for url, comparison in baseline_comparisons
+                )
+            )
 
         if competitor.status != SessionStatus.ACTIVE:
             competitor.status = SessionStatus.ACTIVE
@@ -778,6 +792,77 @@ def select_diffs_for_comparison(diffs: list[PageDiff], limit: int) -> list[PageD
     new_pages = [d for d in diffs if d.change_type is ChangeType.NEW]
     changed_pages = [d for d in diffs if d.change_type is ChangeType.CHANGED]
     return (new_pages + changed_pages)[:limit]
+
+
+_BASELINE_ROW_LABEL = "Первый обход:\nсравнение с нашим сайтом"
+
+# Адреса статей, новостей, документов — не то, с чем сравнивать наше предложение.
+_BASELINE_SKIP_PATH_RE = re.compile(
+    r"/(articles?|blog|news|novosti|media|questions?|voprosy|polza|stat[iy]a?|wiki|tags?|"
+    r"category|author|page|search|faq|oferta[^/]*|polic[yi][^/]*|politika[^/]*|soglasie[^/]*|"
+    r"privacy[^/]*|documents?|dokumenty|svedeniya[^/]*|vakansii|jobs?|login|lk|account)(/|$)",
+    re.IGNORECASE,
+)
+# Учебные материалы в адресе (варианты ВПР с ответами, решебники) — тоже не предложение школы.
+_BASELINE_SKIP_SLUG_RE = re.compile(r"variant|zadani|otvet|reshebnik|gdz|konspekt|urok-\d", re.IGNORECASE)
+# Коммерческие страницы — то, ради чего сравниваем: курсы, цены, классы, программы.
+_BASELINE_KEY_PATH_RE = re.compile(
+    r"kurs|course|price|cen[ay]|stoimost|tarif|shkol|school|klass|class|program|ege|oge|"
+    r"repetitor|tutor|podgotovk|obuchen|napravlen|predmet|homeschool|semejn|eksternat",
+    re.IGNORECASE,
+)
+
+
+def select_key_pages_for_baseline(diffs: list[PageDiff], limit: int) -> list[PageDiff]:
+    """Ключевые страницы конкурента для сравнения с нашим сайтом в первом обходе.
+
+    Статьи/новости/документы отбрасываем; сначала коммерческие адреса (курсы, цены,
+    классы), внутри — короткие (разделы раньше глубоких подстраниц). Порядок
+    детерминированный — повторный первый обход выберет те же страницы.
+    """
+    if limit <= 0:
+        return []
+
+    def _key(diff: PageDiff) -> tuple[int, int, int, str]:
+        path = urlparse(diff.url).path.rstrip("/")
+        depth = path.count("/")
+        commercial = 0 if _BASELINE_KEY_PATH_RE.search(path) else 1
+        return (commercial, depth, len(path), diff.url)
+
+    candidates = [
+        diff
+        for diff in diffs
+        if diff.change_type is ChangeType.NEW
+        and diff.new_text
+        and not _BASELINE_SKIP_PATH_RE.search(urlparse(diff.url).path)
+        and not _BASELINE_SKIP_SLUG_RE.search(urlparse(diff.url).path)
+    ]
+    return sorted(candidates, key=_key)[:limit]
+
+
+_VERDICT_ORDER = {"none": 0, "similar": 1, "exact": 2}
+
+
+async def _compare_baseline_with_own_site(
+    diffs: list[PageDiff], own_site: OwnSite, limited
+) -> list[tuple[str, ComparisonResult]]:
+    """Сравнение ключевых страниц конкурента с нашим сайтом в первом обходе.
+
+    В базу не пишется (OwnSiteComparison привязан к находке, а находок в первом обходе
+    нет) — результат идёт в отчёт и итоговое сообщение. «У нас такого нет» — первым.
+    """
+    selected = select_key_pages_for_baseline(diffs, settings.own_site_baseline_compare_max)
+
+    async def _one(diff: PageDiff) -> ComparisonResult | None:
+        try:
+            return await compare_with_own_site(diff, own_site)
+        except (ClaudeCliError, ValueError) as exc:
+            logger.warning("Не удалось сравнить с нашим сайтом %s: %s", diff.url, exc)
+            return None
+
+    results = await asyncio.gather(*(limited(_one(diff)) for diff in selected))
+    pairs = [(diff.url, result) for diff, result in zip(selected, results, strict=True) if result]
+    return sorted(pairs, key=lambda pair: _VERDICT_ORDER.get(pair[1].verdict, 3))
 
 
 async def _load_own_site_for_comparison(db: Session, competitor: Competitor) -> OwnSite | None:

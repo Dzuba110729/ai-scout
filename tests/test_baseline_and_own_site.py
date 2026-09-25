@@ -13,6 +13,8 @@ from sqlalchemy.pool import StaticPool
 
 from app import bot_views, pipeline
 from app.ai.analyze import AiAnalysisResult
+from app.ai.compare import ComparisonResult, OwnPage, OwnSite
+from app.config import settings
 from app.crawler.crawl import CrawlResult
 from app.crawler.diff import ChangeType, PageDiff
 from app.db import Base
@@ -165,3 +167,69 @@ def test_overdue_cycle_runs_soon_after_start():
 def test_first_setup_and_interval_change_start_from_now():
     assert plan_next_run(None, WEEK, NOW, reset=False) == NOW + WEEK
     assert plan_next_run(NOW + timedelta(days=3), WEEK, NOW, reset=True) == NOW + WEEK
+
+
+def _new(url: str) -> PageDiff:
+    return PageDiff(url=url, change_type=ChangeType.NEW, new_text=f"текст {url}")
+
+
+def test_baseline_picks_commercial_pages_and_skips_articles():
+    diffs = [
+        _new("https://x.ru/articles/english/glagol-to-begin"),
+        _new("https://x.ru/news/2026/novost"),
+        _new("https://x.ru/oferta-arhiv/"),
+        _new("https://x.ru/vpr/zadaniya-vpr-po-fizike-za-7-klass-komplekt-1-variant-1"),
+        _new("https://x.ru/o-nas"),
+        _new("https://x.ru/courses/matematika/5-klass"),
+        _new("https://x.ru/courses"),
+        _new("https://x.ru/price"),
+    ]
+
+    selected = pipeline.select_key_pages_for_baseline(diffs, limit=10)
+
+    assert [d.url for d in selected] == [
+        "https://x.ru/price",
+        "https://x.ru/courses",
+        "https://x.ru/courses/matematika/5-klass",
+        "https://x.ru/o-nas",
+    ]
+    assert len(pipeline.select_key_pages_for_baseline(diffs, limit=2)) == 2
+    assert pipeline.select_key_pages_for_baseline(diffs, limit=0) == []
+
+
+def test_first_crawl_compares_key_pages_with_our_site(env, monkeypatch):
+    db, state = env
+    rival = Competitor(name="Скайсмарт", base_url="https://sky.ru", status=SessionStatus.ACTIVE)
+    db.add(rival)
+    db.commit()
+    state["pages"] = {
+        "https://sky.ru/courses/ege": "курс ЕГЭ",
+        "https://sky.ru/price": "цены",
+        "https://sky.ru/articles/glagol": "статья",
+    }
+    compared: list[str] = []
+
+    async def own_site(_db, _competitor):
+        return OwnSite(base_url="https://og1.ru", pages=[OwnPage(url="https://og1.ru/ege", title=None, text="ЕГЭ")])
+
+    async def fake_compare(page_diff, _own_site):
+        compared.append(page_diff.url)
+        if page_diff.url.endswith("/price"):
+            return ComparisonResult("similar", "https://og1.ru/ceny", "дороже", None, {})
+        return ComparisonResult("none", None, None, "нет курса ЕГЭ", {})
+
+    monkeypatch.setattr(pipeline, "_load_own_site_for_comparison", own_site)
+    monkeypatch.setattr(pipeline, "compare_with_own_site", fake_compare)
+    monkeypatch.setattr(settings, "own_site_baseline_compare_max", 50)
+
+    _run(db, rival)
+
+    assert sorted(compared) == ["https://sky.ru/courses/ege", "https://sky.ru/price"]  # статья пропущена
+    assert state["ai_calls"] == 0  # разбора изменений в первом обходе по-прежнему нет
+    assert db.query(PageChange).count() == 0
+    rows, _notes = state["reports"][0]
+    assert [row[2] for row in rows] == ["https://sky.ru/courses/ege", "https://sky.ru/price"]  # «нет у нас» первым
+    assert rows[0][1].startswith("Первый обход")
+    assert "У нас такого нет" in rows[0][8]
+    assert "нет курса ЕГЭ" in rows[0][9]
+    assert "Сравнили с нашим сайтом" in state["sent"][-1][0]
