@@ -56,27 +56,27 @@ def format_comparison_summary(
 ) -> str:
     """Блок «есть ли такое у нас» для итогового сообщения об обходе.
 
-    Отдельным сообщением на каждую находку не шлём: при десятке изменений это
-    превратилось бы в спам. Длинный список обрезаем — полный лежит в отчёте.
+    Только вердикт и адреса: подробные «отличия» и «чего не хватает» занимают
+    по тысяче символов на страницу и не влезают в сообщение Telegram (лимит 4096),
+    они лежат в отчёте. Сначала страницы, которых у нас нет, — это главное.
     """
     lines = ["🔍 Сравнили с нашим сайтом:"]
 
-    for url, comparison in comparisons[:limit]:
+    ordered = sorted(comparisons, key=lambda item: item[1].our_url is not None)
+    for url, comparison in ordered[:limit]:
         lines.append("")
         lines.append(url)
         head = comparison.label
         if comparison.our_url:
             head = f"{head} — {comparison.our_url}"
         lines.append(head)
-        if comparison.differences:
-            lines.append(f"Отличия: {comparison.differences}")
-        if comparison.missing:
-            lines.append(f"Чего нам не хватает: {comparison.missing}")
 
     remaining = len(comparisons) - limit
     if remaining > 0:
         lines.append("")
         lines.append(f"Ещё сравнений: {remaining} — смотрите в отчёте.")
+    lines.append("")
+    lines.append("Чем отличаемся и чего нам не хватает — в отчёте.")
 
     return "\n".join(lines)
 
@@ -99,6 +99,30 @@ def format_baseline_finished(competitor_name: str, pages: int, report_url: str |
 
 
 _OWN_SITE_LIST_LIMIT = 10
+
+# Telegram не принимает сообщения длиннее 4096 символов (отвечает 400 и сообщение
+# теряется целиком) — так пропадали итоги обходов с сотней находок.
+TELEGRAM_MESSAGE_LIMIT = 4096
+_IMPORTANT_LINE_LIMIT = 200
+_TRUNCATED_NOTE = "… Сообщение сокращено — полностью смотрите в отчёте."
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def fit_telegram_limit(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> str:
+    """Последняя страховка: обрезает текст по границе строки, чтобы Telegram его принял."""
+    if len(text) <= limit:
+        return text
+    budget = limit - len(_TRUNCATED_NOTE) - 2
+    cut = text[:budget]
+    if "\n" in cut:
+        cut = cut[: cut.rindex("\n")]
+    return f"{cut.rstrip()}\n\n{_TRUNCATED_NOTE}"
 
 
 def format_own_site_finished(
@@ -141,13 +165,15 @@ def own_site_buttons(own_site_id: int) -> list[list[dict]]:
 
 
 def format_important_summary(items: list[tuple[str, AiAnalysisResult]], limit: int = 5) -> str:
-    """Блок «🔥 Важное» в итоговом сообщении — ради него сообщение и читают."""
+    """Блок «🔥 Важное» в итоговом сообщении — ради него сообщение и читают.
+
+    По одной короткой строке на находку (причина важности, она и так в одно
+    предложение), полный разбор — в отчёте: иначе сообщение не влезает в Telegram.
+    """
     lines = ["🔥 Важное:"]
     for url, analysis in items[:limit]:
         lines.append("")
-        lines.append(analysis.summary or url)
-        if analysis.importance_reason:
-            lines.append(f"Почему важно: {analysis.importance_reason}")
+        lines.append(_clip(analysis.importance_reason or analysis.summary or url, _IMPORTANT_LINE_LIMIT))
         lines.append(url)
     remaining = len(items) - limit
     if remaining > 0:
@@ -188,7 +214,11 @@ class TelegramNotifier:
             return
 
         url = _TELEGRAM_API.format(token=self.bot_token)
-        payload: dict = {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
+        payload: dict = {
+            "chat_id": self.chat_id,
+            "text": fit_telegram_limit(text),
+            "disable_web_page_preview": True,
+        }
         if buttons:
             payload["reply_markup"] = {"inline_keyboard": buttons}
         async with httpx.AsyncClient(timeout=10.0) as client:

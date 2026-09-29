@@ -129,3 +129,42 @@ def test_new_pages_go_first_then_redated_then_undated_under_the_limit():
 
     assert plan.to_fetch == ["https://x.ru/zz-new", "https://x.ru/z-redated", "https://x.ru/a0"]
     assert set(plan.carry_over) == {f"https://x.ru/a{i}" for i in range(1, 5)}
+
+
+def test_section_can_be_excluded():
+    from app.crawler.crawl import parse_include_paths, path_included
+
+    only_excluded = parse_include_paths("!/articles")
+    assert only_excluded == ["!/articles"]
+    assert not path_included("https://x.ru/articles/glagol", only_excluded)
+    assert path_included("https://x.ru/courses/ege", only_excluded)
+    assert path_included("https://x.ru/", only_excluded)
+
+    mixed = parse_include_paths("/catalog, !/catalog/old")
+    assert path_included("https://x.ru/catalog/new", mixed)
+    assert not path_included("https://x.ru/catalog/old/1", mixed)
+    assert not path_included("https://x.ru/blog", mixed)
+
+
+def test_undated_pages_are_all_fetched_beyond_the_limit_when_allowed():
+    # skysmart.ru: в карте сайта нет дат — лимит 200 каждый раз брал одни и те же
+    # первые страницы по алфавиту, курсы и цены не проверялись вовсе.
+    undated = [SitemapEntry(url=f"https://x.ru/a{i}", lastmod=None) for i in range(5)]
+    redated = [SitemapEntry(url=f"https://x.ru/r{i}", lastmod=NEW) for i in range(3)]
+    previous = {e.url: PreviousPageInfo(text="было", lastmod=None) for e in undated}
+    previous.update({e.url: PreviousPageInfo(text="было", lastmod=OLD) for e in redated})
+
+    plan = plan_crawl(
+        [*undated, *redated],
+        previous_pages=previous,
+        force_full=False,
+        max_fetch=2,
+        max_undated=100,
+    )
+
+    assert plan.to_fetch == [
+        "https://x.ru/r0",
+        "https://x.ru/r1",
+        *(f"https://x.ru/a{i}" for i in range(5)),
+    ]
+    assert set(plan.carry_over) == {"https://x.ru/r2"}

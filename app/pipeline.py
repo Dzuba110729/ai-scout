@@ -44,6 +44,7 @@ from app.crawler.crawl import (
     PreviousPageInfo,
     crawl_competitor,
     parse_include_paths,
+    path_included,
 )
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
@@ -309,6 +310,9 @@ async def _crawl_competitor(
                 context,
                 competitor.base_url,
                 max_pages=max_pages,
+                # Страницы без даты в карте сайта проверяем все, каждый обход: иначе
+                # не узнать, менялись ли они (см. plan_crawl).
+                max_undated_pages=settings.crawl_full_crawl_max_pages,
                 previous_pages=previous_pages,
                 force_full=force_full,
                 cache_lookup=_fetch_cache_lookup(db, competitor.id),
@@ -334,7 +338,11 @@ async def _crawl_competitor(
         return await crawl_competitor_via_apify(competitor.base_url, max_pages=max_pages)
 
 
-async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
+async def run_crawl_for_competitor(
+    db: Session, competitor: Competitor, *, quiet: bool = False
+) -> None:
+    """quiet — плановый обход нашего сайта: без сообщения «ничего не изменилось»,
+    иначе ежедневный обход слал бы его каждый день."""
     notifier = TelegramNotifier()
 
     if competitor.is_paused:
@@ -355,6 +363,12 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
         # синхронный SQLAlchemy на такой запросе держит event loop заметно долго.
         # Нужна ДО обхода: по сохранённой дате из sitemap решаем, что реально грузить.
         previous_by_url = await asyncio.to_thread(_latest_snapshots_by_url, db, competitor.id)
+        # Страницы из разделов, которые больше не отслеживаем (поменяли фильтр
+        # include_paths), не сравниваем — иначе все они выглядели бы «удалёнными».
+        include_paths = parse_include_paths(competitor.include_paths)
+        previous_by_url = {
+            url: item for url, item in previous_by_url.items() if path_included(url, include_paths)
+        }
         previous_texts = {url: text for url, (_page, text) in previous_by_url.items()}
         previous_pages = {
             url: PreviousPageInfo(text=text, lastmod=page.sitemap_lastmod)
@@ -512,6 +526,10 @@ async def run_crawl_for_competitor(db: Session, competitor: Competitor) -> None:
                 (page_diff, analysis)
                 for (page_diff, _page, _change, _moved), analysis in zip(prepared, analyses, strict=True)
             ]
+            if quiet and not own_items and not is_baseline:
+                db.commit()
+                logger.info("Обход нашего сайта завершён: изменений нет")
+                return
             await _notify(
                 notifier,
                 db,

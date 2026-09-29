@@ -118,7 +118,7 @@ def release_stale_crawls(db: Session) -> int:
     return len(stuck)
 
 
-async def _run_claimed(competitor_id: int) -> None:
+async def _run_claimed(competitor_id: int, *, quiet: bool = False) -> None:
     """Выполняет уже занятый (claim) обход — в своей сессии БД и под общим лимитом.
 
     Регистрирует себя в _tasks_by_competitor независимо от того, кто её запустил
@@ -134,7 +134,7 @@ async def _run_claimed(competitor_id: int) -> None:
             try:
                 competitor = db.get(Competitor, competitor_id)
                 if competitor is not None:
-                    await run_crawl_for_competitor(db, competitor)
+                    await run_crawl_for_competitor(db, competitor, quiet=quiet)
             except asyncio.CancelledError:
                 logger.info("Обход конкурента %s остановлен вручную", competitor_id)
                 raise
@@ -222,8 +222,11 @@ def start_all(db: Session) -> CrawlAllResult:
     )
 
 
-async def run_now(db: Session, competitor: Competitor) -> bool:
+async def run_now(db: Session, competitor: Competitor, *, quiet: bool = False) -> bool:
     """Плановый запуск: занимаем и выполняем прямо здесь.
+
+    quiet — не писать в Telegram, если ничего не изменилось (ежедневный обход
+    нашего сайта, см. app/scheduler.py).
 
     Фоновая задача тут не нужна — каждый конкурент это отдельная job планировщика,
     то есть уже отдельная asyncio-задача. False — конкурент на паузе или занят.
@@ -233,5 +236,5 @@ async def run_now(db: Session, competitor: Competitor) -> bool:
     if not claim(db, competitor):
         return False
 
-    await _run_claimed(competitor.id)
+    await _run_claimed(competitor.id, quiet=quiet)
     return True

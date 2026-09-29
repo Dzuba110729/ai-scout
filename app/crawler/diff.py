@@ -26,6 +26,49 @@ def extract_text(html: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", normalized)
 
 
+# Шум, который меняется при каждой загрузке и не несёт смысла для слежки за
+# конкурентом. Сохранённый текст не трогаем — только сравниваем без него, поэтому
+# старые снимки не нужно пересобирать.
+# Плашка «мы используем cookies»: то показывается, то нет. Текст плашки бывает
+# разбит на строки: «…вы соглашаетесь с тем, что мы используем» + «cookies».
+_COOKIE_LINE_RE = re.compile(
+    r"cookie|куки|соглашаетесь с тем, что мы используем$", re.IGNORECASE
+)
+_COOKIE_LINE_MAX = 300
+_CONSENT_BUTTONS = {"ok", "ок", "принять", "хорошо", "понятно", "согласен", "согласна"}
+# Строка из одного числа — счётчик просмотров у статьи: «5313», «2736.3K», «1,2 тыс.».
+_BARE_NUMBER_RE = re.compile(r"^\d[\d \u00a0]*(?:[.,]\d+)?\s?(?:[KkMmКкМм]|тыс\.?)?$")
+# ...но если рядом валюта или «от/до», это цена или скидка, её сравниваем честно.
+_PRICE_NEIGHBOUR_RE = re.compile(r"^(?:₽|руб|р\.|%|\$|€)|(?:^|\s)(?:от|до|за)$", re.IGNORECASE)
+# Тикающие счётчики: «Уже 1 053 человек записались за 24 часа», «Уже идёт 20 дней».
+_TICKER_RE = re.compile(r"^Уже\b.*\d", re.IGNORECASE)
+_DIGITS_RE = re.compile(r"\d[\d \u00a0]*")
+
+
+def _is_price_part(lines: list[str], index: int) -> bool:
+    neighbours = lines[max(0, index - 1) : index] + lines[index + 1 : index + 2]
+    return any(_PRICE_NEIGHBOUR_RE.search(line) for line in neighbours)
+
+
+def normalize_for_compare(text: str) -> str:
+    """Текст страницы без шума — для решения «страница изменилась или нет»."""
+    lines = text.splitlines()
+    result = []
+    for index, line in enumerate(lines):
+        if _COOKIE_LINE_RE.search(line) and len(line) <= _COOKIE_LINE_MAX:
+            continue
+        if line.lower() in _CONSENT_BUTTONS:
+            continue
+        if _BARE_NUMBER_RE.match(line) and not _is_price_part(lines, index):
+            result.append("#")
+            continue
+        if _TICKER_RE.match(line):
+            result.append(_DIGITS_RE.sub("#", line))
+            continue
+        result.append(line)
+    return "\n".join(result)
+
+
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -70,8 +113,8 @@ def diff_crawl(
 
     previous / current: {url: нормализованный_текст_страницы}.
     Возвращает список изменений: new (появился url), removed (пропал url),
-    changed (url есть в обоих, но content_hash отличается). Страницы без
-    изменений в результат не попадают.
+    changed (url есть в обоих, и текст отличается не только шумом — см.
+    normalize_for_compare). Страницы без изменений в результат не попадают.
     """
     results: list[PageDiff] = []
 
@@ -87,7 +130,7 @@ def diff_crawl(
     for url in sorted(previous_urls & current_urls):
         old_text = previous[url]
         new_text = current[url]
-        if content_hash(old_text) != content_hash(new_text):
+        if normalize_for_compare(old_text) != normalize_for_compare(new_text):
             results.append(
                 PageDiff(url=url, change_type=ChangeType.CHANGED, old_text=old_text, new_text=new_text)
             )

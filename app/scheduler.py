@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 
 CYCLE_JOB_ID = "crawl_cycle"
+OWN_SITE_DAILY_JOB_ID = "own_site_daily"
 DIGEST_JOB_ID = "weekly_digest"
 
 # Просроченный цикл (Мак спал, сервис лежал) запускается вскоре после старта —
@@ -90,7 +91,7 @@ async def run_crawl_cycle() -> None:
         own = get_own_site(db)
         if own is not None and not own.is_paused:
             logger.info("Плановый цикл: обходим наш сайт")
-            if not await crawl_manager.run_now(db, own):
+            if not await crawl_manager.run_now(db, own, quiet=True):
                 # Обход нашего сайта уже идёт (запущен вручную) — ждать его не будем:
                 # конкурентов сравним с тем, что уже сохранено.
                 logger.info("Плановый цикл: обход нашего сайта уже идёт — сразу к конкурентам")
@@ -115,6 +116,40 @@ async def run_crawl_cycle() -> None:
         logger.exception("Плановый цикл обходов завершился ошибкой")
     finally:
         db.close()
+
+
+async def run_own_site_daily() -> None:
+    """Ежедневный обход нашего сайта — только новые и изменившиеся страницы (так
+    устроен любой не полный обход, см. plan_crawl). Нужен, чтобы находки конкурента
+    сравнивались с актуальным нашим сайтом, даже если обход конкурента запустили
+    вручную посреди недели. Пишет в Telegram, только если на сайте что-то поменялось."""
+    db = SessionLocal()
+    try:
+        own = get_own_site(db)
+        if own is None or own.is_paused:
+            return
+        logger.info("Ежедневный обход нашего сайта")
+        if not await crawl_manager.run_now(db, own, quiet=True):
+            logger.info("Ежедневный обход нашего сайта пропущен: обход уже идёт")
+    except Exception:
+        logger.exception("Ежедневный обход нашего сайта завершился ошибкой")
+    finally:
+        db.close()
+
+
+def schedule_own_site_daily() -> None:
+    if not settings.own_site_daily_enabled:
+        return
+    scheduler.add_job(
+        run_own_site_daily,
+        trigger=CronTrigger(hour=settings.own_site_daily_hour, timezone=settings.own_site_daily_timezone),
+        id=OWN_SITE_DAILY_JOB_ID,
+        replace_existing=True,
+        # Мак спал в назначенный час — обойти, как только проснулся.
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
+    )
 
 
 def schedule_cycle(db, *, reset: bool = False) -> datetime:
@@ -194,5 +229,6 @@ def start_scheduler() -> None:
     finally:
         db.close()
     schedule_digest()
+    schedule_own_site_daily()
     scheduler.start()
     logger.info("Планировщик запущен, ближайший плановый цикл обходов: %s", next_run.isoformat())

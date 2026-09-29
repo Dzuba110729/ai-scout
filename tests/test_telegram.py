@@ -1,7 +1,9 @@
 from app.ai.compare import ComparisonResult
 from app.crawler.diff import ChangeType, PageDiff
 from app.notifications.telegram import (
+    TELEGRAM_MESSAGE_LIMIT,
     TelegramNotifier,
+    fit_telegram_limit,
     format_blocked_message,
     format_change_message,
     format_comparison_summary,
@@ -21,14 +23,37 @@ def _comparison(verdict="similar", our_url="https://og1.ru/ege"):
     )
 
 
-def test_comparison_summary_explains_what_we_have_and_what_is_missing():
+def test_comparison_summary_is_short_and_points_to_report():
+    # Подробности по тысяче символов на страницу не влезали в сообщение Telegram.
     message = format_comparison_summary([("https://rival.ru/ege", _comparison())])
 
     assert "https://rival.ru/ege" in message
     assert "У нас похожее есть" in message
     assert "https://og1.ru/ege" in message
-    assert "Отличия: У конкурента указана цена" in message
-    assert "Чего нам не хватает: Добавить блок с отзывами" in message
+    assert "Отличия" not in message
+    assert "в отчёте" in message
+
+
+def test_comparison_summary_puts_missing_on_our_side_first():
+    items = [("https://rival.ru/a", _comparison()), ("https://rival.ru/b", _comparison("none", None))]
+
+    message = format_comparison_summary(items)
+
+    assert message.index("https://rival.ru/b") < message.index("https://rival.ru/a")
+
+
+def test_long_message_is_cut_to_telegram_limit():
+    text = "\n".join(f"строка {i} " + "х" * 80 for i in range(200))
+
+    fitted = fit_telegram_limit(text)
+
+    assert len(fitted) <= TELEGRAM_MESSAGE_LIMIT
+    assert fitted.startswith("строка 0 ")
+    assert fitted.endswith("полностью смотрите в отчёте.")
+
+
+def test_short_message_is_not_touched():
+    assert fit_telegram_limit("коротко") == "коротко"
 
 
 def test_comparison_summary_trims_long_list():

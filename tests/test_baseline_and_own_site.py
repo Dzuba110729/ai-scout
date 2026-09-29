@@ -124,6 +124,24 @@ def test_own_site_crawl_reports_what_changed_on_our_site(env):
     assert bot_views.load_changes(db).total == 0
 
 
+def test_quiet_own_site_crawl_is_silent_only_when_nothing_changed(env):
+    # Ежедневный обход нашего сайта не должен каждый день писать «ничего не изменилось».
+    db, state = env
+    own = Competitor(name="Наш сайт", base_url="https://og1.ru", is_own=True, status=SessionStatus.ACTIVE)
+    db.add(own)
+    db.commit()
+    state["pages"] = {"https://og1.ru/ege": "ЕГЭ"}
+    _run(db, own)
+    sent_before = len(state["sent"])
+
+    asyncio.run(pipeline.run_crawl_for_competitor(db, own, quiet=True))
+    assert len(state["sent"]) == sent_before
+
+    state["pages"] = {"https://og1.ru/ege": "ЕГЭ со скидкой"}
+    asyncio.run(pipeline.run_crawl_for_competitor(db, own, quiet=True))
+    assert "Изменилось: ✏️ 1" in state["sent"][-1][0]
+
+
 def test_own_site_without_changes():
     assert "ничего не изменилось" in format_own_site_finished("https://og1.ru", [])
 

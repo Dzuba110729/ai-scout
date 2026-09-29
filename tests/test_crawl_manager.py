@@ -101,7 +101,7 @@ async def test_flag_is_released_when_crawl_raises(monkeypatch):
     competitor = _competitor(1)
     session = _FakeSession([competitor])
 
-    async def boom(_db, _competitor):
+    async def boom(_db, _competitor, **_kwargs):
         raise RuntimeError("краулер упал")
 
     _install(monkeypatch, session, boom)
@@ -118,7 +118,7 @@ async def test_flag_is_released_when_pipeline_returns_early(monkeypatch):
     competitor = _competitor(1)
     session = _FakeSession([competitor])
 
-    async def does_nothing(_db, _competitor):
+    async def does_nothing(_db, _competitor, **_kwargs):
         return None
 
     _install(monkeypatch, session, does_nothing)
@@ -136,7 +136,7 @@ async def test_start_all_respects_global_concurrency_limit(monkeypatch):
     running = 0
     peak = 0
 
-    async def slow_crawl(_db, competitor):
+    async def slow_crawl(_db, competitor, **_kwargs):
         nonlocal running, peak
         running += 1
         peak = max(peak, running)
@@ -161,7 +161,7 @@ async def test_start_all_runs_competitors_in_parallel(monkeypatch):
     running = 0
     peak = 0
 
-    async def slow_crawl(_db, _competitor):
+    async def slow_crawl(_db, _competitor, **_kwargs):
         nonlocal running, peak
         running += 1
         peak = max(peak, running)
@@ -185,7 +185,7 @@ async def test_start_all_skips_paused_and_already_running(monkeypatch):
 
     session = _FakeSession([running_one, paused_one, fresh_one])
 
-    async def noop(_db, _competitor):
+    async def noop(_db, _competitor, **_kwargs):
         return None
 
     _install(monkeypatch, session, noop)
@@ -205,7 +205,7 @@ async def test_start_marks_flag_before_returning(monkeypatch):
     session = _FakeSession([competitor])
     started = asyncio.Event()
 
-    async def slow_crawl(_db, _competitor):
+    async def slow_crawl(_db, _competitor, **_kwargs):
         started.set()
         await asyncio.sleep(0.02)
 
@@ -226,7 +226,7 @@ async def test_run_now_skips_paused_competitor(monkeypatch):
     competitor = _competitor(1, is_paused=True)
     session = _FakeSession([competitor])
 
-    async def never(_db, _competitor):  # pragma: no cover — вызываться не должен
+    async def never(_db, _competitor, **_kwargs):  # pragma: no cover — вызываться не должен
         raise AssertionError("обход конкурента на паузе запускаться не должен")
 
     _install(monkeypatch, session, never)
@@ -268,7 +268,7 @@ async def test_start_all_leaves_cookie_only_sites_for_fresh_cookies(monkeypatch)
     normal = _competitor(2)
     session = _FakeSession([cookie_site, normal])
 
-    async def noop(_db, _competitor):
+    async def noop(_db, _competitor, **_kwargs):
         return None
 
     _install(monkeypatch, session, noop)

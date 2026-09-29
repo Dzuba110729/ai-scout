@@ -82,3 +82,31 @@ def test_diff_crawl_handles_multiple_changes_together():
 
     assert by_type == {ChangeType.NEW, ChangeType.CHANGED, ChangeType.REMOVED}
     assert len(changes) == 3
+
+
+def test_cookie_banner_and_view_counters_are_not_changes():
+    old = "Глагол bear\nПохожие статьи\n2736K\nИмена\n5313"
+    new = (
+        "Глагол bear\nПользуясь нашим сайтом, вы соглашаетесь с тем, что мы используем\n"
+        "cookies\nOK\nПохожие статьи\n2736.3K\nИмена\n5331"
+    )
+
+    assert diff_crawl({"https://x.ru/a": old}, {"https://x.ru/a": new}) == []
+
+
+def test_ticking_counters_are_not_changes():
+    old = "Курс\nУже идёт 17 дней, но можно присоединиться"
+    new = "Курс\nУже идёт 20 дней, но можно присоединиться"
+
+    assert diff_crawl({"https://x.ru/a": old}, {"https://x.ru/a": new}) == []
+
+
+def test_price_split_over_lines_is_still_a_change():
+    # Цена часто разбита на строки «1 390» и «₽» — её прятать нельзя.
+    old = "Курс\n1 390\n₽"
+    new = "Курс\n1 590\n₽"
+
+    [change] = diff_crawl({"https://x.ru/a": old}, {"https://x.ru/a": new})
+
+    assert change.change_type is ChangeType.CHANGED
+    assert "1 590" in change.diff_text

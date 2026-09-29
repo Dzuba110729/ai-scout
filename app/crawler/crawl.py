@@ -352,6 +352,7 @@ def plan_crawl(
     previous_pages: dict[str, PreviousPageInfo],
     force_full: bool,
     max_fetch: int,
+    max_undated: int | None = None,
 ) -> CrawlPlan:
     """Решает, какие страницы грузить с сайта заново, а какие можно не трогать.
 
@@ -363,6 +364,11 @@ def plan_crawl(
     сохранённой; страницы без известной даты вообще (своей или чужой) — с ними
     сравнивать не с чем, поэтому перепроверяем как раньше, каждый раз. Остальное
     просто переносим из прошлого снимка, не открывая браузер.
+
+    max_undated — отдельный потолок для страниц без даты: они грузятся все (до этого
+    потолка) сверх max_fetch. Иначе на сайте без дат в карте (skysmart.ru) лимит
+    каждую неделю брал одни и те же первые страницы по алфавиту, а остальные — курсы,
+    цены — не проверялись вовсе. None — страницы без даты делят общий max_fetch.
 
     Страница, пропавшая из карты сайта, сюда вообще не попадает ни в to_fetch,
     ни в carry_over — этого достаточно, чтобы diff_crawl отдельно классифицировал
@@ -388,7 +394,13 @@ def plan_crawl(
         else:
             carry_over[entry.url] = previous.text
 
-    to_fetch = [url for _priority, url in sorted(candidates)[: max(0, max_fetch)]]
+    if max_undated is None:
+        to_fetch = [url for _priority, url in sorted(candidates)[: max(0, max_fetch)]]
+    else:
+        dated = sorted(candidate for candidate in candidates if candidate[0] < 2)
+        undated = sorted(candidate for candidate in candidates if candidate[0] == 2)
+        to_fetch = [url for _priority, url in dated[: max(0, max_fetch)]]
+        to_fetch += [url for _priority, url in undated[: max(0, max_undated)]]
 
     # Кандидаты сверх лимита за этот прогон не потеряны и не "удалены" — просто
     # переносим прежний текст, а по-настоящему изменившееся содержимое подхватит
@@ -593,14 +605,25 @@ async def _fetch_all(
 
 
 def parse_include_paths(raw: str | None) -> list[str]:
-    """«/catalog, /courses\n/podgotovka-*» -> ["/catalog", "/courses", "/podgotovka-*"]."""
+    """«/catalog, /courses\n/podgotovka-*» -> ["/catalog", "/courses", "/podgotovka-*"].
+
+    «!/articles» — наоборот, исключить раздел: ["!/articles"].
+    """
     if not raw:
         return []
     prefixes = []
     for part in raw.replace(",", " ").split():
-        part = part.strip().lstrip("/")
-        prefixes.append("/" + (part if part.endswith("*") else part.rstrip("/")))
+        excluded = part.startswith("!")
+        part = part.lstrip("!").strip().lstrip("/")
+        prefix = "/" + (part if part.endswith("*") else part.rstrip("/"))
+        prefixes.append(("!" if excluded else "") + prefix)
     return prefixes
+
+
+def _path_matches(path: str, prefix: str) -> bool:
+    if prefix.endswith("*"):
+        return path.startswith(prefix[:-1])
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def path_included(url: str, include_paths: list[str]) -> bool:
@@ -608,19 +631,22 @@ def path_included(url: str, include_paths: list[str]) -> bool:
 
     Главная входит всегда. «/courses» — сам раздел и всё внутри (/courses/…), но не
     /courses-old; «/podgotovka-*» — всё, что начинается с /podgotovka-.
+    «!/articles» исключает раздел; если в списке одни исключения — берём весь сайт,
+    кроме них (у skysmart.ru статьи с меняющимися при каждой загрузке блоками
+    «похожие статьи» давали по 200 ложных изменений за обход).
     """
     if not include_paths:
         return True
     path = urlparse(url).path.rstrip("/") or "/"
     if path == "/":
         return True
-    for prefix in include_paths:
-        if prefix.endswith("*"):
-            if path.startswith(prefix[:-1]):
-                return True
-        elif path == prefix or path.startswith(prefix + "/"):
-            return True
-    return False
+    excluded = [prefix[1:] for prefix in include_paths if prefix.startswith("!")]
+    included = [prefix for prefix in include_paths if not prefix.startswith("!")]
+    if any(_path_matches(path, prefix) for prefix in excluded):
+        return False
+    if not included:
+        return True
+    return any(_path_matches(path, prefix) for prefix in included)
 
 
 async def _sitemap_page_via_browser(context: BrowserContext, base_url: str) -> list[SitemapEntry]:
@@ -650,6 +676,7 @@ async def crawl_competitor(
     base_url: str,
     *,
     max_pages: int = DEFAULT_MAX_PAGES,
+    max_undated_pages: int | None = None,
     previous_pages: dict[str, PreviousPageInfo] | None = None,
     force_full: bool = True,
     cache_lookup: CacheLookup | None = None,
@@ -678,7 +705,13 @@ async def crawl_competitor(
 
     sitemap_lastmod_by_url: dict[str, datetime | None] = {}
     if entries:
-        plan = plan_crawl(entries, previous_pages=previous_pages, force_full=force_full, max_fetch=max_pages)
+        plan = plan_crawl(
+            entries,
+            previous_pages=previous_pages,
+            force_full=force_full,
+            max_fetch=max_pages,
+            max_undated=max_undated_pages,
+        )
         to_fetch = plan.to_fetch
         carry_over = plan.carry_over
         urls_total = plan.urls_total
@@ -692,7 +725,13 @@ async def crawl_competitor(
     ):
         # Главная закрыта от простого запроса антибот-проверкой, но в браузере нашлась
         # ссылка «Карта сайта» — дальше как с обычной картой.
-        plan = plan_crawl(entries, previous_pages=previous_pages, force_full=force_full, max_fetch=max_pages)
+        plan = plan_crawl(
+            entries,
+            previous_pages=previous_pages,
+            force_full=force_full,
+            max_fetch=max_pages,
+            max_undated=max_undated_pages,
+        )
         to_fetch = plan.to_fetch
         carry_over = plan.carry_over
         urls_total = plan.urls_total

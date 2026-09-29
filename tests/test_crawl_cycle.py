@@ -33,7 +33,7 @@ def db(monkeypatch):
 def test_cycle_crawls_own_site_to_the_end_before_competitors(db, monkeypatch):
     events = []
 
-    async def fake_run_now(_db, competitor):
+    async def fake_run_now(_db, competitor, quiet=False):
         events.append(f"start {competitor.name}")
         await asyncio.sleep(0.01)
         events.append(f"done {competitor.name}")
@@ -58,7 +58,7 @@ def test_paused_own_site_is_skipped(db, monkeypatch):
     db.commit()
     calls = []
 
-    async def fake_run_now(_db, competitor):
+    async def fake_run_now(_db, competitor, quiet=False):
         calls.append(competitor.name)
         return True
 
@@ -72,3 +72,31 @@ def test_paused_own_site_is_skipped(db, monkeypatch):
     asyncio.run(scheduler_module.run_crawl_cycle())
 
     assert calls == []
+
+
+def test_daily_run_crawls_only_own_site_quietly(db, monkeypatch):
+    calls = []
+
+    async def fake_run_now(_db, competitor, quiet=False):
+        calls.append((competitor.name, quiet))
+        return True
+
+    def fail_start_all(_db):
+        raise AssertionError("ежедневный обход не должен трогать конкурентов")
+
+    monkeypatch.setattr(scheduler_module.crawl_manager, "run_now", fake_run_now)
+    monkeypatch.setattr(scheduler_module.crawl_manager, "start_all", fail_start_all)
+
+    asyncio.run(scheduler_module.run_own_site_daily())
+
+    assert calls == [("Наш сайт", True)]
+
+
+def test_daily_own_site_job_runs_at_moscow_hour():
+    scheduler_module.schedule_own_site_daily()
+    try:
+        job = scheduler_module.scheduler.get_job(scheduler_module.OWN_SITE_DAILY_JOB_ID)
+        assert str(job.trigger.timezone) == "Europe/Moscow"
+        assert "hour='5'" in str(job.trigger)
+    finally:
+        scheduler_module.scheduler.remove_all_jobs()
