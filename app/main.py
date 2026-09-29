@@ -16,6 +16,24 @@ logging.basicConfig(level=settings.log_level)
 
 logger = logging.getLogger(__name__)
 
+BOT_RESTART_DELAY_SECONDS = 30
+
+
+async def _run_bot_forever(dispatcher, bot) -> None:
+    """Держит бота запущенным: после перезагрузки Мака сеть появляется не сразу,
+    и start_polling падает на первом же запросе к Telegram — тогда пробуем снова."""
+    while True:
+        try:
+            await dispatcher.start_polling(bot, handle_signals=False)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Telegram-бот остановился с ошибкой, перезапуск через %s с", BOT_RESTART_DELAY_SECONDS
+            )
+        await asyncio.sleep(BOT_RESTART_DELAY_SECONDS)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +52,7 @@ async def lifespan(app: FastAPI):
     if settings.telegram_bot_token:
         bot = create_bot()
         dispatcher = create_dispatcher()
-        bot_task = asyncio.create_task(dispatcher.start_polling(bot))
+        bot_task = asyncio.create_task(_run_bot_forever(dispatcher, bot))
         logger.info("Telegram-бот запущен (long polling)")
 
     yield

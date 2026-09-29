@@ -17,7 +17,9 @@ crawl_manager.start/stop отсюда безопасны без дополнит
 и только всё остальное уходит ИИ-помощнику.
 """
 
+import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -47,6 +49,7 @@ from app.crawler.browser import storage_state_path_for
 from app.crawler.cookies import (
     CookieExportError,
     cookie_domains,
+    expired_guard_cookies,
     parse_cookie_export,
     site_matches_cookies,
 )
@@ -801,25 +804,96 @@ async def add_url_received(message: Message, state: FSMContext) -> None:
 _COOKIE_FILE_MAX_BYTES = 512 * 1024
 
 
+# Telegram режет текст длиннее 4096 знаков на несколько сообщений, а выгрузка кук
+# foxford.ru — ~10 тыс. знаков. Куски копим по чату и склеиваем по порядку.
+_COOKIE_FRAGMENT_MARKERS = ('"domain"', '"name"', '"value"', '"expirationDate"', '"storeId"', '"sameSite"')
+_COOKIE_DRAFT_TTL_SECONDS = 120
+_COOKIE_DRAFT_GIVE_UP_SECONDS = 8
+_cookie_drafts: dict[int, dict[int, Message]] = {}
+_cookie_draft_started: dict[int, float] = {}
+_cookie_draft_tasks: set[asyncio.Task] = set()
+
+
 def _looks_like_cookie_export(text: str | None) -> bool:
-    return bool(text) and text.lstrip().startswith("[") and '"domain"' in text
+    return bool(text) and any(marker in text for marker in _COOKIE_FRAGMENT_MARKERS)
+
+
+def _joined_cookie_draft(parts: list[str]) -> list[dict] | None:
+    for glue in ("\n", ""):
+        try:
+            return parse_cookie_export(glue.join(parts).encode("utf-8"))
+        except CookieExportError:
+            continue
+    return None
+
+
+async def _give_up_cookie_draft(chat_id: int, started: float, first: Message) -> None:
+    """Выгрузка так и не собралась целиком — говорим об этом, а не молчим."""
+    await asyncio.sleep(_COOKIE_DRAFT_GIVE_UP_SECONDS)
+    if _cookie_draft_started.get(chat_id) != started:
+        return
+    _cookie_drafts.pop(chat_id, None)
+    _cookie_draft_started.pop(chat_id, None)
+    await first.answer(
+        "Не принял куки: выгрузка пришла не целиком или не в том формате. "
+        "Надёжнее прислать её файлом: в Cookie-Editor Export → JSON, вставьте в TextEdit, "
+        "сохраните как файл и отправьте сюда (скрепка → Файл).",
+        reply_markup=MAIN_KB,
+    )
+
+
+async def _collect_cookie_text(message: Message) -> None:
+    chat_id = message.chat.id
+    now = time.monotonic()
+    started = _cookie_draft_started.get(chat_id)
+    if started is None or now - started > _COOKIE_DRAFT_TTL_SECONDS:
+        started = now
+        _cookie_draft_started[chat_id] = started
+        _cookie_drafts[chat_id] = {}
+        task = asyncio.create_task(_give_up_cookie_draft(chat_id, started, message))
+        _cookie_draft_tasks.add(task)
+        task.add_done_callback(_cookie_draft_tasks.discard)
+    draft = _cookie_drafts[chat_id]
+    draft[message.message_id] = message
+
+    ordered = [draft[mid] for mid in sorted(draft)]
+    cookies = _joined_cookie_draft([m.text or "" for m in ordered])
+    if cookies is None:
+        return  # ждём остальные куски
+    _cookie_drafts.pop(chat_id, None)
+    _cookie_draft_started.pop(chat_id, None)
+    await _apply_cookies(ordered, cookies)
 
 
 async def _accept_cookies(message: Message, raw: bytes) -> None:
-    """Выгрузка кук из Cookie-Editor -> сессия конкурента -> сразу обход.
-
-    Сообщение с куками удаляем из чата: это вход на сайт, хранить его в переписке незачем.
-    """
     try:
         cookies = parse_cookie_export(raw)
     except CookieExportError as exc:
         await message.answer(f"Не принял куки: {exc}.", reply_markup=MAIN_KB)
         return
+    await _apply_cookies([message], cookies)
 
-    try:
-        await message.delete()
-    except TelegramBadRequest:
-        logger.warning("Не удалось удалить сообщение с куками из чата")
+
+async def _apply_cookies(messages: list[Message], cookies: list[dict]) -> None:
+    """Выгрузка кук из Cookie-Editor -> сессия конкурента -> сразу обход.
+
+    Сообщения с куками удаляем из чата: это вход на сайт, хранить его в переписке незачем.
+    """
+    message = messages[0]
+    for part in messages:
+        try:
+            await part.delete()
+        except TelegramBadRequest:
+            logger.warning("Не удалось удалить сообщение с куками из чата")
+
+    expired = expired_guard_cookies(cookies)
+    if expired:
+        await message.answer(
+            "Не принял куки: пропуск защиты сайта в них уже истёк (живёт всего 15–60 минут), "
+            "с ним сайт не пустит. Обновите страницу сайта в Chrome и сразу выгрузите куки заново.",
+            reply_markup=MAIN_KB,
+        )
+        return
 
     db = SessionLocal()
     try:
@@ -865,7 +939,7 @@ async def cookies_file_received(message: Message, bot: Bot) -> None:
 
 @router.message(StateFilter(None), F.text.func(_looks_like_cookie_export))
 async def cookies_text_received(message: Message) -> None:
-    await _accept_cookies(message, message.text.encode("utf-8"))
+    await _collect_cookie_text(message)
 
 
 @router.message(StateFilter(None), F.text)

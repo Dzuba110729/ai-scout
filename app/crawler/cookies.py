@@ -9,6 +9,7 @@ storage_state конкурента (storage_states/competitor_<id>.json) и об
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -62,6 +63,9 @@ def parse_cookie_export(raw: bytes) -> list[dict]:
     text = _rtf_to_text(raw) if raw.lstrip().startswith(b"{\\rtf") else raw.decode("utf-8-sig", errors="replace")
     # TextEdit и мессенджеры любят заменять кавычки на «умные».
     text = text.replace("“", '"').replace("”", '"').strip()
+    # «запусти обход [ {...} ]» — перед выгрузкой бывает подпись, отрезаем её.
+    if "[" in text and not text.startswith("["):
+        text = text[text.index("[") :]
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -72,6 +76,20 @@ def parse_cookie_export(raw: bytes) -> list[dict]:
         if not isinstance(cookie, dict) or not {"name", "value", "domain"} <= cookie.keys():
             raise CookieExportError("в списке не куки — в Cookie-Editor нужен Export → JSON")
     return data
+
+
+def expired_guard_cookies(cookies: list[dict], now: float | None = None) -> list[str]:
+    """Куки защиты сайта (Qrator живёт минуты — от 15 до 60), срок которых уже вышел.
+    С ними обход гарантированно получит 401 — нет смысла его запускать."""
+    now = time.time() if now is None else now
+    return [
+        str(c["name"])
+        for c in cookies
+        if str(c["name"]).lower().startswith("qrator_jsid")
+        and not c.get("session")
+        and c.get("expirationDate") is not None
+        and float(c["expirationDate"]) <= now
+    ]
 
 
 def cookie_domains(cookies: list[dict]) -> set[str]:

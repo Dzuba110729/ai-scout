@@ -157,3 +157,32 @@ async def test_bot_explains_when_cookies_are_from_unknown_site(bot_db):
 
     assert started == []
     assert "foxford.ru" in message.answers[-1]
+
+
+def test_cookie_export_with_a_caption_before_it_is_accepted():
+    raw = ("запусти обход\n" + json.dumps([_COOKIE], ensure_ascii=False)).encode()
+
+    assert parse_cookie_export(raw)[0]["name"] == "qrator_jsid"
+
+
+def test_cookie_export_split_by_telegram_is_glued_back():
+    from app.telegram_bot import _joined_cookie_draft, _looks_like_cookie_export
+
+    full = json.dumps([_COOKIE, {**_COOKIE, "name": "_sid"}], ensure_ascii=False, indent=4)
+    cut_line = full.index('"value"', full.index("_sid"))  # Telegram режет по переводу строки
+    parts = [full[:cut_line].rstrip(), full[cut_line:]]
+
+    assert all(_looks_like_cookie_export(p) for p in parts)
+    assert _joined_cookie_draft(parts[:1]) is None  # первый кусок сам по себе — не выгрузка
+    assert [c["name"] for c in _joined_cookie_draft(parts)] == ["qrator_jsid", "_sid"]
+
+
+def test_expired_qrator_cookie_is_detected():
+    from app.crawler.cookies import expired_guard_cookies
+
+    fresh = {**_COOKIE, "session": False, "expirationDate": 2000.0}
+    other = {**_COOKIE, "name": "_sid", "session": False, "expirationDate": 10.0}
+
+    assert expired_guard_cookies([fresh, other], now=1000.0) == []
+    assert expired_guard_cookies([fresh, other], now=3000.0) == ["qrator_jsid"]
+    assert expired_guard_cookies([_COOKIE], now=3000.0) == []  # сессионная не истекает
