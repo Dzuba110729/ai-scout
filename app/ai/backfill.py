@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 
 from app.ai.analyze import ClaudeCliError, analyze_page_change
 from app.config import settings
-from app.crawler.diff import ChangeType, PageDiff
-from app.models import AiAnalysis, Page, PageChange
+from app.crawler.crawl import parse_include_paths, path_included
+from app.crawler.diff import ChangeType, PageDiff, normalize_for_compare
+from app.models import AiAnalysis, Competitor, Page, PageChange
 from app.models import ChangeType as DbChangeType
 
 logger = logging.getLogger(__name__)
@@ -35,18 +36,38 @@ _DB_TO_CHANGE_TYPE = {
 }
 
 
+def _still_worth_analysing(change: PageChange, page: Page, include_paths: str | None) -> bool:
+    """Находка всё ещё интересна: раздел отслеживается и правка — не шум.
+
+    Правила шума и список разделов со временем уточняются (CLAUDE.md, «Шум и длина
+    итога»). Старые находки, которые по новым правилам — шум, ИИ не отдаём.
+    """
+    if not path_included(page.url, parse_include_paths(include_paths)):
+        return False
+    if change.change_type is DbChangeType.CHANGED and change.old_snapshot and change.new_snapshot:
+        old_text = change.old_snapshot.text_content
+        new_text = change.new_snapshot.text_content
+        return normalize_for_compare(old_text) != normalize_for_compare(new_text)
+    return True
+
+
 def find_pending(db: Session, competitor_id: int | None = None) -> list[tuple[PageChange, Page]]:
     """Находки без ИИ-разбора — старые первыми, чтобы давние пропуски не ждали вечно."""
     query = (
-        db.query(PageChange, Page)
+        db.query(PageChange, Page, Competitor.include_paths)
         .join(Page, Page.id == PageChange.page_id)
+        .join(Competitor, Competitor.id == Page.competitor_id)
         .outerjoin(AiAnalysis, AiAnalysis.page_change_id == PageChange.id)
         .filter(AiAnalysis.id.is_(None))
         .order_by(PageChange.id)
     )
     if competitor_id is not None:
         query = query.filter(Page.competitor_id == competitor_id)
-    return query.all()
+    return [
+        (change, page)
+        for change, page, include_paths in query.all()
+        if _still_worth_analysing(change, page, include_paths)
+    ]
 
 
 def to_page_diff(page: Page, change: PageChange) -> PageDiff:

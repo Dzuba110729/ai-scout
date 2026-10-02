@@ -13,6 +13,9 @@ from app.scheduler import start_scheduler
 from app.telegram_bot import create_bot, create_dispatcher
 
 logging.basicConfig(level=settings.log_level)
+# httpx на уровне INFO пишет каждый запрос с полным адресом, а в адресе запросов к
+# Telegram Bot API — секретный токен бота. В лог он попадать не должен.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

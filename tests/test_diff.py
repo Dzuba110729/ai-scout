@@ -1,4 +1,10 @@
-from app.crawler.diff import ChangeType, content_hash, diff_crawl, extract_text
+from app.crawler.diff import (
+    ChangeType,
+    content_hash,
+    diff_crawl,
+    extract_text,
+    strip_related_blocks,
+)
 
 
 def test_extract_text_strips_scripts_and_styles():
@@ -110,3 +116,43 @@ def test_price_split_over_lines_is_still_a_change():
 
     assert change.change_type is ChangeType.CHANGED
     assert "1 590" in change.diff_text
+
+
+def _blog_page(related: list[tuple[str, str]]) -> str:
+    cards = []
+    for title, views in related:
+        cards += ["Родителям", title, "12 мин", views, "23 сентября 2026"]
+    return "\n".join(
+        ["Статья про дроби", "Текст статьи", "Похожие статьи", "Previous", "Next", *cards, "Наши", "приложения"]
+    )
+
+
+def test_reshuffled_related_articles_are_not_changes():
+    old = _blog_page([("Дроби в 5 классе", "304"), ("Счёт с дошкольником", "2839")])
+    new = _blog_page([("ВПР в 7 классе", "14419"), ("Дроби в 5 классе", "305"), ("Сюрреализм", "14024")])
+
+    assert diff_crawl({"/a": old}, {"/a": new}) == []
+
+
+def test_real_change_next_to_related_block_is_shown_without_the_block():
+    old = _blog_page([("Дроби в 5 классе", "304")])
+    new = _blog_page([("ВПР в 7 классе", "14419")]).replace("Текст статьи", "Новый текст статьи")
+
+    [change] = diff_crawl({"/a": old}, {"/a": new})
+
+    assert "Новый текст статьи" in change.diff_text
+    assert "ВПР в 7 классе" not in change.diff_text
+    assert "Наши" in strip_related_blocks(new)
+
+
+def test_heading_without_dated_cards_is_kept():
+    text = "Новые статьи\nСкоро здесь появятся материалы\nКупить курс"
+
+    assert strip_related_blocks(text) == text
+
+
+def test_countdown_timer_and_reading_time_are_not_changes():
+    old = "Уже идёт 5 дней, но можно присоединиться\n04:52\nдней\n12 мин\nЦена 2 990 ₽"
+    new = "Уже идёт 21 день, но можно присоединиться\n04:56\nдня\n13 мин\nЦена 2 990 ₽"
+
+    assert diff_crawl({"/a": old}, {"/a": new}) == []

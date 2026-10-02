@@ -135,3 +135,23 @@ async def test_backfill_with_nothing_pending_does_not_call_cli(db, monkeypatch):
     monkeypatch.setattr(backfill_module, "analyze_page_change", fake_analyze)
 
     assert await backfill_missing_analyses(db, rival.id) == (0, 0)
+
+
+def test_find_pending_skips_excluded_sections_and_noise_only_changes(db):
+    rival = _competitor(db, "rival")
+    rival.include_paths = "!/repetitors"
+    kept = _change(db, rival, "https://rival.ru/courses")
+    _change(db, rival, "https://rival.ru/repetitors/fizika/perm")
+    page = Page(competitor_id=rival.id, url="https://rival.ru/blog/a", title="a")
+    db.add(page)
+    db.flush()
+    old = PageSnapshot(page_id=page.id, content_hash="o", text_content="Статья\n12 мин")
+    new = PageSnapshot(page_id=page.id, content_hash="n", text_content="Статья\n13 мин")
+    db.add_all([old, new])
+    db.flush()
+    db.add(
+        PageChange(page_id=page.id, change_type=ChangeType.CHANGED, old_snapshot_id=old.id, new_snapshot_id=new.id)
+    )
+    db.commit()
+
+    assert [change.id for change, _page in find_pending(db)] == [kept.id]

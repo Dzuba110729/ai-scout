@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 from app.config import settings
@@ -21,6 +22,26 @@ _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 class ClaudeCliError(Exception):
     """CLI недоступен или вернул код ошибки после ретрая."""
+
+
+class ClaudeLimitError(ClaudeCliError):
+    """Лимит подписки исчерпан — повторять бессмысленно до паузы."""
+
+
+# Как CLI сообщает об исчерпанном лимите: «Claude AI usage limit reached|…»,
+# «You've hit your limit · resets 3pm», «5-hour limit reached».
+_LIMIT_RE = re.compile(r"usage limit|hit your limit|limit reached|rate limit|limit · resets", re.IGNORECASE)
+# time.monotonic(), до которого CLI не вызываем (общий на весь процесс).
+_limit_pause_until = 0.0
+
+
+def _limit_pause_left() -> float:
+    return max(0.0, _limit_pause_until - time.monotonic())
+
+
+def _start_limit_pause() -> None:
+    global _limit_pause_until
+    _limit_pause_until = time.monotonic() + settings.claude_cli_limit_pause_minutes * 60
 
 
 @dataclass
@@ -131,6 +152,8 @@ def parse_ai_response(raw_text: str) -> AiAnalysisResult:
 
 
 async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cwd: str | None = None) -> str:
+    if _limit_pause_left():
+        raise ClaudeLimitError(f"лимит подписки Claude, пауза ещё {int(_limit_pause_left() // 60) + 1} мин")
     process = await asyncio.create_subprocess_exec(
         settings.claude_cli_path,
         "-p",
@@ -154,7 +177,14 @@ async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cw
         raise ClaudeCliError("Claude CLI не ответил за отведённое время")
 
     if process.returncode != 0:
-        raise ClaudeCliError(f"Claude CLI завершился с кодом {process.returncode}: {stderr.decode(errors='ignore')}")
+        # Причину CLI нередко пишет в stdout, а stderr пустой — берём оба.
+        details = " ".join(
+            part.decode(errors="ignore").strip() for part in (stderr, stdout) if part.strip()
+        )[-500:]
+        if _LIMIT_RE.search(details):
+            _start_limit_pause()
+            raise ClaudeLimitError(f"лимит подписки Claude: {details}")
+        raise ClaudeCliError(f"Claude CLI завершился с кодом {process.returncode}: {details or 'без пояснений'}")
 
     return stdout.decode(errors="ignore")
 
@@ -167,11 +197,13 @@ async def run_claude_cli(
     for attempt in range(retries + 1):
         try:
             return await _run_claude_cli_once(prompt, extra_args, cwd)
+        except ClaudeLimitError:
+            raise
         except ClaudeCliError as exc:
             last_error = exc
             logger.warning("Claude CLI попытка %s не удалась: %s", attempt + 1, exc)
             if attempt < retries:
-                await asyncio.sleep(2**attempt)
+                await asyncio.sleep(5 * 2**attempt)
     assert last_error is not None
     raise last_error
 
