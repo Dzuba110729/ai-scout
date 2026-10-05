@@ -56,17 +56,20 @@ def test_build_row_for_moved_page_shows_target_and_what_is_there_now():
 
     assert row[1] == "Страница переехала"
     assert row[2] == "https://x.ru/old"
+    assert "Новый адрес: https://x.ru/new" in row[6]
     assert "Теперь там: Страница курса по физике" in row[6]
-    assert row[7] == "https://x.ru/new"
+    assert len(row) == len(_HEADER)
 
 
-def test_build_row_for_deleted_page_leaves_redirect_column_empty():
+def test_report_has_no_redirect_column():
+    assert "Куда переехала" not in _HEADER
     page_diff = PageDiff(url="https://x.ru/old", change_type=ChangeType.REMOVED, old_text="текст")
 
     row = build_row(page_diff, None, datetime.now(UTC))
 
     assert row[1] == "Страница удалена"
-    assert row[7] == ""
+    assert len(row) == len(_HEADER)
+    assert "Новый адрес" not in row[6]
 
 
 def test_build_row_adds_comparison_with_our_site():
@@ -81,10 +84,10 @@ def test_build_row_adds_comparison_with_our_site():
 
     row = build_row(page_diff, None, datetime.now(UTC), comparison=comparison)
 
-    assert "У нас похожее есть" in row[8]
-    assert "https://og1.ru/promo" in row[8]
-    assert "Отличия: У конкурента есть цена" in row[9]
-    assert "Чего нам не хватает: Добавить отзывы учеников." in row[9]
+    assert "У нас похожее есть" in row[7]
+    assert "https://og1.ru/promo" in row[7]
+    assert "Отличия: У конкурента есть цена" in row[8]
+    assert "Чего нам не хватает: Добавить отзывы учеников." in row[8]
 
 
 def test_build_row_leaves_comparison_columns_empty_when_not_compared():
@@ -92,8 +95,8 @@ def test_build_row_leaves_comparison_columns_empty_when_not_compared():
 
     row = build_row(page_diff, None, datetime.now(UTC))
 
+    assert row[7] == ""
     assert row[8] == ""
-    assert row[9] == ""
 
 
 def test_client_not_configured_without_any_credentials(monkeypatch, tmp_path):

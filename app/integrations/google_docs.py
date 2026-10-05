@@ -13,6 +13,7 @@
 """
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -45,7 +46,6 @@ _HEADER = [
     "УТП (чем конкурент выделяется)",
     "Призыв к действию",
     "Описание (ИИ)",
-    "Куда переехала",
     "Есть ли такое у нас",
     "Чем отличается и чего нам не хватает",
 ]
@@ -70,20 +70,24 @@ _IMPORTANCE_LABELS = {
 # (УТП, описание) становятся нечитаемо узкими рядом с короткими (Дата, Категория) —
 # ровно то, что видно на скриншоте нечитаемого отчёта.
 _COLUMN_WIDTH_WEIGHTS = [
-    0.09,  # Дата
+    0.08,  # Дата
     0.09,  # Тип изменения
     0.13,  # URL
     0.07,  # Категория
-    0.13,  # УТП (чем конкурент выделяется)
+    0.15,  # УТП (чем конкурент выделяется)
     0.09,  # Призыв к действию
-    0.15,  # Описание (ИИ)
-    0.08,  # Куда переехала
-    0.08,  # Есть ли такое у нас
+    0.20,  # Описание (ИИ)
+    0.10,  # Есть ли такое у нас
     0.09,  # Чем отличается и чего нам не хватает
 ]
 
 _PAGE_SIDE_MARGIN_PT = 14.2  # 0,5 см вместо стандартных 2,54 — таблице нужна вся ширина листа
-_TABLE_FONT_SIZE_PT = 9  # 10 колонок на альбомном листе — стандартные 11pt не помещаются
+_TABLE_FONT_SIZE_PT = 9  # 9 колонок на альбомном листе — стандартные 11pt не помещаются
+
+
+_NORMAL = "NORMAL_TEXT"
+_HEADING_1 = "HEADING_1"
+_HEADING_2 = "HEADING_2"
 
 
 class GoogleDocsError(Exception):
@@ -102,10 +106,13 @@ def build_row(
 ) -> list[str]:
     """Строка таблицы отчёта.
 
-    redirect_* заполняются, если страница не удалена, а переехала; comparison —
-    ответ на вопрос «есть ли такое у нас на сайте» (пусто, если не сравнивали).
+    redirect_* заполняются, если страница не удалена, а переехала (новый адрес
+    пишется в «Описание» — отдельная колонка под него почти всегда пустовала);
+    comparison — ответ на вопрос «есть ли такое у нас на сайте» (пусто, если не сравнивали).
     """
     summary_parts = [(analysis.summary if analysis else "") or ""]
+    if redirect_to:
+        summary_parts.append(f"Новый адрес: {redirect_to}")
     if redirect_summary:
         summary_parts.append(f"Теперь там: {redirect_summary}")
     if analysis and analysis.importance == "high" and analysis.importance_reason:
@@ -124,7 +131,6 @@ def build_row(
         (analysis.usp if analysis else "") or "",
         (analysis.cta if analysis else "") or "",
         "\n".join(part for part in summary_parts if part),
-        redirect_to or "",
         _comparison_verdict_cell(comparison),
         _comparison_details_cell(comparison),
     ]
@@ -196,6 +202,78 @@ def landscape_content_width_pt(page_size: dict) -> float:
     """
     landscape_width = max(page_size["width"]["magnitude"], page_size["height"]["magnitude"])
     return landscape_width - 2 * _PAGE_SIDE_MARGIN_PT
+
+
+@dataclass
+class ReportSummary:
+    """Блок «Коротко» в начале отчёта: прочитал его — и понятно, открывать ли таблицу.
+
+    important и missing — пары (что, адрес); их уже отобрали и обрезали до нужного числа.
+    """
+
+    heading: str
+    counts: str
+    overview: str | None = None
+    important: list[tuple[str, str]] = field(default_factory=list)
+    missing: list[tuple[str, str]] = field(default_factory=list)
+    important_total: int = 0  # сколько всего, если в список влезли не все
+    missing_total: int = 0
+
+
+def _bullet(text: str, url: str) -> str:
+    return f"• {text} — {url}" if text else f"• {url}"
+
+
+def build_intro_paragraphs(summary: ReportSummary | None, notes: list[str]) -> list[tuple[str, str]]:
+    """Абзацы перед таблицей: (стиль абзаца Google Docs, текст)."""
+    if summary is None:
+        # Без сводки — как раньше: только пояснения к прогону.
+        return [(_NORMAL, note) for note in notes]
+
+    paragraphs = [(_HEADING_1, summary.heading)]
+    if summary.overview:
+        paragraphs.append((_NORMAL, f"Главное: {summary.overview}"))
+    paragraphs.append((_NORMAL, summary.counts))
+    for title, items, total in (
+        ("🔥 Важное", summary.important, summary.important_total),
+        ("❌ У нас такого нет", summary.missing, summary.missing_total),
+    ):
+        if not items:
+            continue
+        paragraphs.append((_HEADING_2, title))
+        paragraphs.extend((_NORMAL, _bullet(text, url)) for text, url in items)
+        if total > len(items):
+            paragraphs.append((_NORMAL, f"…и ещё {total - len(items)} — в таблице ниже."))
+    paragraphs.append((_HEADING_1, "Подробности"))
+    paragraphs.extend((_NORMAL, note) for note in notes)
+    return paragraphs
+
+
+def _utf16_len(text: str) -> int:
+    # Индексы Docs API считаются в UTF-16: эмодзи 🔥 — это две единицы, а не одна.
+    return len(text.encode("utf-16-le")) // 2
+
+
+def build_intro_requests(paragraphs: list[tuple[str, str]]) -> list[dict]:
+    """Вставка абзацев в начало пустого документа и стиль каждого (заголовок/обычный)."""
+    if not paragraphs:
+        return []
+    text = "".join(f"{paragraph}\n" for _style, paragraph in paragraphs) + "\n"
+    requests: list[dict] = [{"insertText": {"location": {"index": 1}, "text": text}}]
+    index = 1
+    for style, paragraph in paragraphs:
+        end = index + _utf16_len(paragraph) + 1
+        requests.append(
+            {
+                "updateParagraphStyle": {
+                    "range": {"startIndex": index, "endIndex": end},
+                    "paragraphStyle": {"namedStyleType": style},
+                    "fields": "namedStyleType",
+                }
+            }
+        )
+        index = end
+    return requests
 
 
 def _load_oauth_user_credentials(token_path: str) -> UserCredentials:
@@ -298,11 +376,12 @@ class GoogleDocsClient:
         run_at: datetime,
         rows: list[list[str]],
         notes: list[str] | None = None,
+        summary: ReportSummary | None = None,
     ) -> str:
         """Создаёт документ прогона с таблицей находок в папке конкурента. Возвращает url.
 
-        notes — пояснения к прогону простым языком (например, что сайт больше, чем
-        мы успели посмотреть); идут отдельным абзацем перед таблицей.
+        summary — блок «Коротко» в самом начале; notes — пояснения к прогону простым
+        языком (например, что сайт больше, чем мы успели посмотреть), идут перед таблицей.
         """
         if not self.is_configured:
             raise GoogleDocsError("Google не настроен: заполните OAuth или сервисный аккаунт в .env")
@@ -323,8 +402,9 @@ class GoogleDocsClient:
 
             page_size = doc["documentStyle"]["pageSize"]
             self._set_page_layout(doc_id, page_size)
-            if notes:
-                self._insert_notes(doc_id, notes)
+            intro = build_intro_requests(build_intro_paragraphs(summary, notes or []))
+            if intro:
+                self._docs().documents().batchUpdate(documentId=doc_id, body={"requests": intro}).execute()
             self._insert_table(doc_id, [_HEADER, *rows], landscape_content_width_pt(page_size))
 
             return f"https://docs.google.com/document/d/{doc_id}/edit"
@@ -358,13 +438,6 @@ class GoogleDocsClient:
                     }
                 ]
             },
-        ).execute()
-
-    def _insert_notes(self, doc_id: str, notes: list[str]) -> None:
-        text = "\n".join(notes) + "\n\n"
-        self._docs().documents().batchUpdate(
-            documentId=doc_id,
-            body={"requests": [{"insertText": {"location": {"index": 1}, "text": text}}]},
         ).execute()
 
     def _body_end_index(self, doc_id: str) -> int:

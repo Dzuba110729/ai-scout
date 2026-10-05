@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.analyze import ClaudeCliError, analyze_page_change
 from app.config import settings
-from app.crawler.crawl import parse_include_paths, path_included
+from app.crawler.crawl import competitor_include_paths, path_included
 from app.crawler.diff import ChangeType, PageDiff, normalize_for_compare
 from app.models import AiAnalysis, Competitor, Page, PageChange
 from app.models import ChangeType as DbChangeType
@@ -36,13 +36,15 @@ _DB_TO_CHANGE_TYPE = {
 }
 
 
-def _still_worth_analysing(change: PageChange, page: Page, include_paths: str | None) -> bool:
+def _still_worth_analysing(
+    change: PageChange, page: Page, include_paths: str | None, *, is_own: bool = False
+) -> bool:
     """Находка всё ещё интересна: раздел отслеживается и правка — не шум.
 
     Правила шума и список разделов со временем уточняются (CLAUDE.md, «Шум и длина
     итога»). Старые находки, которые по новым правилам — шум, ИИ не отдаём.
     """
-    if not path_included(page.url, parse_include_paths(include_paths)):
+    if not path_included(page.url, competitor_include_paths(include_paths, is_own=is_own)):
         return False
     if change.change_type is DbChangeType.CHANGED and change.old_snapshot and change.new_snapshot:
         old_text = change.old_snapshot.text_content
@@ -54,7 +56,7 @@ def _still_worth_analysing(change: PageChange, page: Page, include_paths: str | 
 def find_pending(db: Session, competitor_id: int | None = None) -> list[tuple[PageChange, Page]]:
     """Находки без ИИ-разбора — старые первыми, чтобы давние пропуски не ждали вечно."""
     query = (
-        db.query(PageChange, Page, Competitor.include_paths)
+        db.query(PageChange, Page, Competitor.include_paths, Competitor.is_own)
         .join(Page, Page.id == PageChange.page_id)
         .join(Competitor, Competitor.id == Page.competitor_id)
         .outerjoin(AiAnalysis, AiAnalysis.page_change_id == PageChange.id)
@@ -65,8 +67,8 @@ def find_pending(db: Session, competitor_id: int | None = None) -> list[tuple[Pa
         query = query.filter(Page.competitor_id == competitor_id)
     return [
         (change, page)
-        for change, page, include_paths in query.all()
-        if _still_worth_analysing(change, page, include_paths)
+        for change, page, include_paths, is_own in query.all()
+        if _still_worth_analysing(change, page, include_paths, is_own=is_own)
     ]
 
 

@@ -51,6 +51,11 @@ def format_finished_message(competitor_name: str, changes_count: int, report_url
     return "\n".join(lines)
 
 
+def format_overview(overview: str) -> str:
+    """Абзац «Главное» от ИИ — сразу под строкой «обход завершён»."""
+    return f"📝 Главное: {_clip(overview, _OVERVIEW_LIMIT)}"
+
+
 def format_comparison_summary(
     comparisons: list[tuple[str, ComparisonResult]], limit: int = 5
 ) -> str:
@@ -104,6 +109,7 @@ _OWN_SITE_LIST_LIMIT = 10
 # теряется целиком) — так пропадали итоги обходов с сотней находок.
 TELEGRAM_MESSAGE_LIMIT = 4096
 _IMPORTANT_LINE_LIMIT = 200
+_OVERVIEW_LIMIT = 1000
 _TRUNCATED_NOTE = "… Сообщение сокращено — полностью смотрите в отчёте."
 
 

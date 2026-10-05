@@ -11,6 +11,7 @@
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -26,7 +27,8 @@ from app.ai.analyze import (
     run_claude_cli,
 )
 from app.ai.backfill import backfill_missing_analyses
-from app.ai.compare import ComparisonResult, OwnSite, compare_with_own_site
+from app.ai.compare import VERDICT_NONE, ComparisonResult, OwnSite, compare_with_own_site
+from app.ai.run_overview import OverviewItem, write_run_overview
 from app.config import STORAGE_STATE_DIR, settings
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import (
@@ -42,13 +44,18 @@ from app.crawler.crawl import (
     CrawlResult,
     OnUrlsDiscovered,
     PreviousPageInfo,
+    competitor_include_paths,
     crawl_competitor,
-    parse_include_paths,
     path_included,
 )
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
-from app.integrations.google_docs import GoogleDocsClient, GoogleDocsError, build_row
+from app.integrations.google_docs import (
+    GoogleDocsClient,
+    GoogleDocsError,
+    ReportSummary,
+    build_row,
+)
 from app.models import (
     AiAnalysis,
     ComparisonVerdict,
@@ -75,6 +82,7 @@ from app.notifications.telegram import (
     format_error_message,
     format_finished_message,
     format_important_summary,
+    format_overview,
     format_own_site_finished,
     format_started_message,
     own_site_buttons,
@@ -319,7 +327,7 @@ async def _crawl_competitor(
                 cache_store=_fetch_cache_store(db, competitor.id),
                 on_urls_discovered=_on_urls_discovered(db, competitor.id),
                 sitemap_url=competitor.sitemap_url,
-                include_paths=parse_include_paths(competitor.include_paths),
+                include_paths=competitor_include_paths(competitor.include_paths, is_own=competitor.is_own),
             )
             if has_session:
                 # Защита могла выдать за время обхода свежие куки — сохраняем их,
@@ -365,7 +373,7 @@ async def run_crawl_for_competitor(
         previous_by_url = await asyncio.to_thread(_latest_snapshots_by_url, db, competitor.id)
         # Страницы из разделов, которые больше не отслеживаем (поменяли фильтр
         # include_paths), не сравниваем — иначе все они выглядели бы «удалёнными».
-        include_paths = parse_include_paths(competitor.include_paths)
+        include_paths = competitor_include_paths(competitor.include_paths, is_own=competitor.is_own)
         previous_by_url = {
             url: item for url, item in previous_by_url.items() if path_included(url, include_paths)
         }
@@ -377,6 +385,10 @@ async def run_crawl_for_competitor(
         force_full = _needs_full_crawl(competitor)
 
         crawl_result = await _crawl_competitor(db, competitor, previous_pages, force_full)
+        # Apify-фолбэк фильтр разделов не знает — отсекаем лишнее здесь, для любого пути.
+        crawl_result.pages = {
+            url: text for url, text in crawl_result.pages.items() if path_included(url, include_paths)
+        }
 
         diffs = diff_crawl(previous_texts, crawl_result.pages)
         run_at = datetime.now(UTC)
@@ -450,13 +462,17 @@ async def run_crawl_for_competitor(
         ranked_rows: list[tuple[int, list[str]]] = []
         comparisons: list[tuple[str, ComparisonResult]] = []
         important: list[tuple[str, AiAnalysisResult]] = []
+        findings: list[RunFinding] = []
         for (page_diff, page, _page_change, moved), analysis, comparison in zip(
             prepared, analyses, comparisons_by_item, strict=True
         ):
+            findings.append(RunFinding(page_diff, moved, analysis, comparison))
             if comparison:
                 comparisons.append((page_diff.url, comparison))
             if analysis and analysis.importance == "high":
                 important.append((page_diff.url, analysis))
+            if _is_minor(analysis):
+                continue  # «мелочь» в отчёт не пишем (решение владельца) — она остаётся в ленте бота
 
             ranked_rows.append(
                 (
@@ -474,6 +490,7 @@ async def run_crawl_for_competitor(
         # Важное — в начало отчёта; внутри одной важности порядок прежний (sort стабилен).
         report_rows = [row for _rank, row in sorted(ranked_rows, key=lambda item: item[0])]
 
+        baseline_comparisons: list[tuple[str, ComparisonResult]] = []
         if is_baseline and own_site:
             # Изменений в первом обходе нет, но «есть ли у нас такое» спросить уже можно.
             baseline_comparisons = await _compare_baseline_with_own_site(diffs, own_site, _limited)
@@ -499,6 +516,13 @@ async def run_crawl_for_competitor(
             notes.append(_format_backfill_note(backfilled, attempted))
 
         report_url = None
+        overview = None
+        if not competitor.is_own:
+            overview = await write_run_overview(
+                competitor.name,
+                build_overview_items(findings, baseline_comparisons),
+                baseline=is_baseline,
+            )
         # Отчёт в Google Docs — только по конкурентам и после каждого их обхода, даже
         # при нуле находок: «изменений нет» — тоже результат. По нашему сайту отчёт
         # не нужен (решение владельца): что на нём изменилось, бот присылает в чат.
@@ -507,7 +531,17 @@ async def run_crawl_for_competitor(
                 report_notes = [*notes, format_baseline_note(len(diffs))]
             else:
                 report_notes = notes if report_rows else [*notes, _NO_CHANGES_NOTE]
-            report_url = await _write_run_report(db, competitor, run_at, report_rows, report_notes)
+            summary = build_report_summary(
+                competitor.name,
+                run_at,
+                findings,
+                baseline_pages=len(diffs) if is_baseline else None,
+                baseline_comparisons=baseline_comparisons,
+                overview=overview,
+            )
+            report_url = await _write_run_report(
+                db, competitor, run_at, report_rows, report_notes, summary=summary
+            )
             if report_url:
                 competitor.last_report_url = report_url
                 competitor.last_report_at = run_at
@@ -548,6 +582,8 @@ async def run_crawl_for_competitor(
             message_parts = [format_baseline_finished(competitor.name, len(diffs), report_url)]
         else:
             message_parts = [format_finished_message(competitor.name, len(diffs), report_url)]
+        if overview:
+            message_parts.append(format_overview(overview))
         if important:
             message_parts.append(format_important_summary(important))
         if notes:
@@ -674,6 +710,133 @@ def build_run_notes(crawl_result: CrawlResult, checks: dict[str, MissingPageChec
     return notes
 
 
+@dataclass
+class RunFinding:
+    """Находка обхода со всем, что о ней узнали: для отчёта, сводки и абзаца «Главное»."""
+
+    page_diff: PageDiff
+    moved_to: str | None
+    analysis: AiAnalysisResult | None
+    comparison: ComparisonResult | None
+
+
+SUMMARY_LIST_LIMIT = 5
+_SUMMARY_LINE_LIMIT = 200
+
+_FINDING_KIND_LABELS = {
+    ChangeType.NEW: "Новая страница",
+    ChangeType.CHANGED: "Изменение",
+    ChangeType.REMOVED: "Страница удалена",
+}
+
+
+def _is_minor(analysis: AiAnalysisResult | None) -> bool:
+    return analysis is not None and analysis.importance == "low"
+
+
+def _finding_label(finding: RunFinding) -> str:
+    return "Страница переехала" if finding.moved_to else _FINDING_KIND_LABELS[finding.page_diff.change_type]
+
+
+def _short(text: str | None) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= _SUMMARY_LINE_LIMIT else text[: _SUMMARY_LINE_LIMIT - 1].rstrip() + "…"
+
+
+def _by_importance(findings: list[RunFinding]) -> list[RunFinding]:
+    return sorted(findings, key=lambda f: importance_rank(f.analysis.importance if f.analysis else None))
+
+
+def _findings_count_line(findings: list[RunFinding]) -> str:
+    if not findings:
+        return "Изменений с прошлого обхода нет."
+    counts: dict[str, int] = {}
+    for finding in findings:
+        label = _finding_label(finding)
+        counts[label] = counts.get(label, 0) + 1
+    names = {
+        "Новая страница": "новых страниц",
+        "Изменение": "изменений",
+        "Страница удалена": "удалено",
+        "Страница переехала": "переехало",
+    }
+    parts = [f"{names[label]} — {counts[label]}" for label in names if counts.get(label)]
+    line = "Найдено: " + ", ".join(parts) + "."
+    high = sum(1 for f in findings if f.analysis and f.analysis.importance == "high")
+    if high:
+        line += f" Из них важных 🔥 — {high}."
+    return line
+
+
+def build_report_summary(
+    competitor_name: str,
+    run_at: datetime,
+    findings: list[RunFinding],
+    *,
+    baseline_pages: int | None,
+    baseline_comparisons: list[tuple[str, ComparisonResult]],
+    overview: str | None,
+) -> ReportSummary:
+    """Блок «Коротко» в начале отчёта: цифры, до 5 важных находок и до 5 «у нас такого нет».
+
+    «Мелочь» в отчёт не идёт — в цифрах она только упоминается одной строкой.
+    """
+    minor = sum(1 for f in findings if _is_minor(f.analysis))
+    findings = [f for f in findings if not _is_minor(f.analysis)]
+    if baseline_pages is not None:
+        counts = f"Первый обход — точка отсчёта: запомнили страниц — {baseline_pages}."
+        if baseline_comparisons:
+            counts += f" Сравнили с нашим сайтом ключевых страниц — {len(baseline_comparisons)}."
+    else:
+        counts = _findings_count_line(findings)
+        if minor and not findings:
+            counts = "Значимых изменений нет."
+        if minor:
+            counts += f" Мелких правок в отчёт не вошло: {minor} (они есть в ленте бота)."
+
+    important = [
+        (_short(f.analysis.importance_reason or f.analysis.summary), f.page_diff.url)
+        for f in findings
+        if f.analysis and f.analysis.importance == "high"
+    ]
+    missing = [
+        (_short(f.analysis.summary if f.analysis else None), f.page_diff.url)
+        for f in _by_importance(findings)
+        if f.comparison and f.comparison.verdict == VERDICT_NONE
+    ]
+    missing.extend(
+        (_short(comparison.missing), url)
+        for url, comparison in baseline_comparisons
+        if comparison.verdict == VERDICT_NONE
+    )
+
+    return ReportSummary(
+        heading=f"Коротко: {competitor_name}, обход {run_at.strftime('%d.%m.%Y')}",
+        counts=counts,
+        overview=overview,
+        important=important[:SUMMARY_LIST_LIMIT],
+        important_total=len(important),
+        missing=missing[:SUMMARY_LIST_LIMIT],
+        missing_total=len(missing),
+    )
+
+
+def build_overview_items(
+    findings: list[RunFinding], baseline_comparisons: list[tuple[str, ComparisonResult]]
+) -> list[OverviewItem]:
+    """Что отдать ИИ для абзаца «Главное»: важное первым, в первом обходе — сравнения."""
+    items = [
+        OverviewItem(f.page_diff.url, _finding_label(f), f.analysis, f.comparison)
+        for f in _by_importance(findings)
+        if not _is_minor(f.analysis)
+    ]
+    ordered = sorted(baseline_comparisons, key=lambda item: item[1].verdict != VERDICT_NONE)
+    items.extend(
+        OverviewItem(url, "Первый обход", comparison=comparison) for url, comparison in ordered
+    )
+    return items
+
+
 def build_redirect_prompt(old_url: str, new_url: str, target_text: str) -> str:
     return _REDIRECT_PROMPT.format(old_url=old_url, new_url=new_url, text=target_text[:4000])
 
@@ -699,6 +862,7 @@ def _create_run_report(
     run_at: datetime,
     rows: list[list[str]],
     notes: list[str],
+    summary: ReportSummary | None = None,
 ) -> tuple[str | None, str | None, str | None]:
     """Создаёт документ прогона на Google Drive. Возвращает (url отчёта, id папки, url папки).
 
@@ -713,7 +877,8 @@ def _create_run_report(
         folder_url = None
         if not folder_id:
             folder_id, folder_url = client.get_or_create_competitor_folder(competitor_name)
-        return client.create_run_document(folder_id, run_at, rows, notes=notes), folder_id, folder_url
+        url = client.create_run_document(folder_id, run_at, rows, notes=notes, summary=summary)
+        return url, folder_id, folder_url
     except GoogleDocsError:
         logger.exception("Не удалось сохранить отчёт обхода конкурента %s в Google Docs", competitor_name)
         return None, folder_id, None
@@ -725,9 +890,11 @@ async def _write_run_report(
     run_at: datetime,
     rows: list[list[str]],
     notes: list[str],
+    *,
+    summary: ReportSummary | None = None,
 ) -> str | None:
     report_url, folder_id, folder_url = await asyncio.to_thread(
-        _create_run_report, competitor.name, competitor.google_drive_folder_id, run_at, rows, notes
+        _create_run_report, competitor.name, competitor.google_drive_folder_id, run_at, rows, notes, summary
     )
 
     # ORM-объект правим на основном потоке, а не внутри to_thread: Session не

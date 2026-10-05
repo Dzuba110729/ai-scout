@@ -620,7 +620,32 @@ def parse_include_paths(raw: str | None) -> list[str]:
     return prefixes
 
 
+# У нашей школы нет программ колледжа (СПО) — такие страницы конкурентов не обходим,
+# не сравниваем и в отчёт не берём (решение владельца, 2026-10-05). У нашего сайта
+# свои статьи про колледж есть, поэтому только для конкурентов.
+COMPETITOR_EXCLUDED_PATHS = (
+    "!*college*",  # foxford.ru/college/…, onlineschool-1.ru/onlinecollege-1
+    "!*kolledzh*",
+    "!*kolledj*",
+    "!*koledzh*",
+    "!*tehnikum*",
+    "!/spo",
+    "!/spo-*",
+)
+
+
+def competitor_include_paths(raw: str | None, *, is_own: bool) -> list[str]:
+    """Разделы, которые отслеживаем у сайта: свой фильтр + общие исключения для конкурентов."""
+    paths = parse_include_paths(raw)
+    if is_own:
+        return paths
+    return paths + parse_include_paths(" ".join(COMPETITOR_EXCLUDED_PATHS))
+
+
 def _path_matches(path: str, prefix: str) -> bool:
+    if prefix.startswith("/*") and prefix.endswith("*") and len(prefix) > 3:
+        # «*college*» — слово в любом месте адреса.
+        return prefix[2:-1].lower() in path.lower()
     if prefix.endswith("*"):
         return path.startswith(prefix[:-1])
     return path == prefix or path.startswith(prefix + "/")
@@ -631,7 +656,7 @@ def path_included(url: str, include_paths: list[str]) -> bool:
 
     Главная входит всегда. «/courses» — сам раздел и всё внутри (/courses/…), но не
     /courses-old; «/podgotovka-*» — всё, что начинается с /podgotovka-.
-    «!/articles» исключает раздел; если в списке одни исключения — берём весь сайт,
+    «!/articles» исключает раздел, «!*college*» — любой адрес с этим словом; если в списке одни исключения — берём весь сайт,
     кроме них (у skysmart.ru статьи с меняющимися при каждой загрузке блоками
     «похожие статьи» давали по 200 ложных изменений за обход).
     """

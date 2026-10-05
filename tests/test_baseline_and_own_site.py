@@ -39,8 +39,9 @@ def env(monkeypatch):
             category=None, usp=None, cta=None, summary=f"Суть {page_diff.url}", raw_response={}, importance="medium"
         )
 
-    async def fake_report(_db, _competitor, _run_at, rows, notes):
+    async def fake_report(_db, _competitor, _run_at, rows, notes, *, summary=None):
         state["reports"].append((rows, notes))
+        state.setdefault("summaries", []).append(summary)
         return "https://docs/report"
 
     async def fake_notify(_notifier, _db, competitor, text, *, page_change_id, buttons=None):
@@ -248,6 +249,44 @@ def test_first_crawl_compares_key_pages_with_our_site(env, monkeypatch):
     rows, _notes = state["reports"][0]
     assert [row[2] for row in rows] == ["https://sky.ru/courses/ege", "https://sky.ru/price"]  # «нет у нас» первым
     assert rows[0][1].startswith("Первый обход")
-    assert "У нас такого нет" in rows[0][8]
-    assert "нет курса ЕГЭ" in rows[0][9]
+    assert "У нас такого нет" in rows[0][7]
+    assert "нет курса ЕГЭ" in rows[0][8]
+    summary = state["summaries"][0]
+    assert "точка отсчёта" in summary.counts
+    assert summary.missing == [("нет курса ЕГЭ", "https://sky.ru/courses/ege")]
     assert "Сравнили с нашим сайтом" in state["sent"][-1][0]
+
+
+def test_report_skips_minor_and_college_and_carries_overview(env, monkeypatch):
+    db, state = env
+    rival = Competitor(name="Фоксфорд", base_url="https://foxford.ru", status=SessionStatus.ACTIVE)
+    db.add(rival)
+    db.commit()
+    state["pages"] = {"https://foxford.ru/a": "цена 4900", "https://foxford.ru/b": "о школе"}
+    _run(db, rival)
+
+    async def analyze(page_diff):
+        importance = "low" if page_diff.url.endswith("/b") else "high"
+        return AiAnalysisResult(None, None, None, f"Суть {page_diff.url}", {}, importance, "Цены")
+
+    async def overview(name, items, *, baseline):
+        state["overview_items"] = [item.url for item in items]
+        return "Конкурент снизил цены."
+
+    monkeypatch.setattr(pipeline, "analyze_page_change", analyze)
+    monkeypatch.setattr(pipeline, "write_run_overview", overview)
+    state["pages"] = {
+        "https://foxford.ru/a": "цена 3900",
+        "https://foxford.ru/b": "о школе!",
+        "https://foxford.ru/college/9-class": "колледж",
+    }
+    _run(db, rival)
+
+    rows, _notes = state["reports"][-1]
+    assert [row[2] for row in rows] == ["https://foxford.ru/a"]  # мелочь /b и колледж не в отчёте
+    assert not any("college" in c.page.url for c in db.query(PageChange).all())
+    assert state["overview_items"] == ["https://foxford.ru/a"]
+    summary = state["summaries"][-1]
+    assert summary.overview == "Конкурент снизил цены."
+    assert "Мелких правок в отчёт не вошло: 1" in summary.counts
+    assert "📝 Главное: Конкурент снизил цены." in state["sent"][-1][0]
