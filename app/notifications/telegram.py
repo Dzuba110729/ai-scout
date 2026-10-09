@@ -205,6 +205,19 @@ def format_error_message(competitor_name: str, reason: str) -> str:
     return f"⛔ Обход конкурента «{competitor_name}» завершился ошибкой\nПричина: {reason}"
 
 
+def format_unavailable_message(competitor_name: str, url: str, *, retry_note: str | None = None) -> str:
+    """Сайт не отдал ни одной страницы. Прежние данные не тронуты: ни «удалённых»
+    страниц, ни ложного «изменений нет»."""
+    lines = [
+        f"⚠️ Обход «{competitor_name}» не состоялся: сайт {url} не открылся",
+        "Возможные причины: нет интернета на Маке, сайт не работает или долго отвечает.",
+        "Сохранённые данные не тронуты.",
+    ]
+    if retry_note:
+        lines.append(retry_note)
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     def __init__(self, bot_token: str | None = None, chat_id: str | None = None):
         self.bot_token = bot_token if bot_token is not None else settings.telegram_bot_token

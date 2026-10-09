@@ -231,7 +231,7 @@ async def test_run_now_skips_paused_competitor(monkeypatch):
 
     _install(monkeypatch, session, never)
 
-    assert await crawl_manager.run_now(session, competitor) is False
+    assert await crawl_manager.run_now(session, competitor) is None
     assert competitor.is_crawling is False
 
 

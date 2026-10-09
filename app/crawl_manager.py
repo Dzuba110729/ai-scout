@@ -118,12 +118,14 @@ def release_stale_crawls(db: Session) -> int:
     return len(stuck)
 
 
-async def _run_claimed(competitor_id: int, *, quiet: bool = False) -> None:
+async def _run_claimed(competitor_id: int, *, quiet: bool = False) -> bool:
     """Выполняет уже занятый (claim) обход — в своей сессии БД и под общим лимитом.
 
     Регистрирует себя в _tasks_by_competitor независимо от того, кто её запустил
     (ручная кнопка через _spawn или плановый job через run_now) — так stop()
     одинаково работает для обоих путей.
+
+    True — обход прошёл до конца (см. run_crawl_for_competitor).
     """
     task = asyncio.current_task()
     if task is not None:
@@ -134,12 +136,14 @@ async def _run_claimed(competitor_id: int, *, quiet: bool = False) -> None:
             try:
                 competitor = db.get(Competitor, competitor_id)
                 if competitor is not None:
-                    await run_crawl_for_competitor(db, competitor, quiet=quiet)
+                    return await run_crawl_for_competitor(db, competitor, quiet=quiet)
+                return False
             except asyncio.CancelledError:
                 logger.info("Обход конкурента %s остановлен вручную", competitor_id)
                 raise
             except Exception:  # фоновая задача: ошибку логируем, наверх нести некуда
                 logger.exception("Обход конкурента %s завершился ошибкой", competitor_id)
+                return False
             finally:
                 _release_if_still_crawling(db, competitor_id)
                 db.close()
@@ -222,19 +226,21 @@ def start_all(db: Session) -> CrawlAllResult:
     )
 
 
-async def run_now(db: Session, competitor: Competitor, *, quiet: bool = False) -> bool:
+async def run_now(db: Session, competitor: Competitor, *, quiet: bool = False) -> bool | None:
     """Плановый запуск: занимаем и выполняем прямо здесь.
 
     quiet — не писать в Telegram, если ничего не изменилось (ежедневный обход
     нашего сайта, см. app/scheduler.py).
 
     Фоновая задача тут не нужна — каждый конкурент это отдельная job планировщика,
-    то есть уже отдельная asyncio-задача. False — конкурент на паузе или занят.
+    то есть уже отдельная asyncio-задача.
+
+    None — обход не запускали (конкурент на паузе или уже обходится); True — обход
+    прошёл до конца; False — запускали, но не состоялся (сайт не открылся и т.п.).
     """
     if competitor.is_paused:
-        return False
+        return None
     if not claim(db, competitor):
-        return False
+        return None
 
-    await _run_claimed(competitor.id, quiet=quiet)
-    return True
+    return await _run_claimed(competitor.id, quiet=quiet)

@@ -113,6 +113,12 @@ class Settings(BaseSettings):
     own_site_daily_enabled: bool = True
     own_site_daily_hour: int = 5
     own_site_daily_timezone: str = "Europe/Moscow"
+    # Наш сайт не открылся (нет интернета, сайт лёг, защита не пустила) — обход
+    # повторяется через own_site_retry_minutes, всего до own_site_retry_attempts
+    # повторов. В плановом цикле конкуренты ждут удачного обхода нашего сайта; если
+    # все повторы не помогли — обходятся со старым снимком нашего сайта (2026-10-09).
+    own_site_retry_minutes: int = 45
+    own_site_retry_attempts: int = 3
 
     # Сравнение находок конкурента с нашим сайтом («есть ли такое у нас»).
     # Каждое сравнение — отдельный вызов ИИ, поэтому за один обход их число
@@ -126,11 +132,13 @@ class Settings(BaseSettings):
     own_site_baseline_compare_max: int = 50
 
     # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
-    # часовому поясу Мака, на котором крутится сервис. digest_days — за сколько дней
+    # digest_timezone, а не по поясу Мака (Мак стоит на тихоокеанском времени, и
+    # «10 утра» превращалось в 20:00 по Москве). digest_days — за сколько дней
     # собирать находки.
     digest_enabled: bool = True
     digest_day_of_week: str = "mon"
     digest_hour: int = 10
+    digest_timezone: str = "Europe/Moscow"
     digest_days: int = 7
 
     log_level: str = "INFO"

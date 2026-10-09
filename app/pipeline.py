@@ -85,6 +85,7 @@ from app.notifications.telegram import (
     format_overview,
     format_own_site_finished,
     format_started_message,
+    format_unavailable_message,
     own_site_buttons,
     report_buttons,
 )
@@ -346,16 +347,30 @@ async def _crawl_competitor(
         return await crawl_competitor_via_apify(competitor.base_url, max_pages=max_pages)
 
 
+class SiteUnavailableError(Exception):
+    """Сайт не отдал ни одной страницы, хотя в прошлый раз они были: нет интернета,
+    сайт лёг или не открывается за таймаут. Это не «изменений нет» и не «все
+    страницы удалены» — обход просто не состоялся, данные не трогаем."""
+
+    def __init__(self, url: str):
+        super().__init__(f"Сайт {url} не открылся — не получено ни одной страницы")
+        self.url = url
+
+
 async def run_crawl_for_competitor(
     db: Session, competitor: Competitor, *, quiet: bool = False
-) -> None:
+) -> bool:
     """quiet — плановый обход нашего сайта: без сообщения «ничего не изменилось»,
-    иначе ежедневный обход слал бы его каждый день."""
+    иначе ежедневный обход слал бы его каждый день. При quiet и о том, что сайт не
+    открылся, не пишем: это сообщит планировщик вместе со временем повтора.
+
+    True — обход прошёл до конца; False — не состоялся (пауза, блокировка, сайт не
+    открылся, ошибка). По этому планировщик решает, повторять ли обход нашего сайта."""
     notifier = TelegramNotifier()
 
     if competitor.is_paused:
         logger.info("Конкурент %s на паузе — пропускаем обход", competitor.name)
-        return
+        return False
 
     # Отметку «обход идёт» уже поставил crawl_manager — синхронно, до постановки
     # фоновой задачи. Повторять здесь проверку is_crawling нельзя: раз мы внутри
@@ -389,6 +404,11 @@ async def run_crawl_for_competitor(
         crawl_result.pages = {
             url: text for url, text in crawl_result.pages.items() if path_included(url, include_paths)
         }
+        # Неизменившиеся страницы переносятся в pages из прошлого снимка, поэтому пустой
+        # результат при непустом прошлом — не «ничего не поменялось», а сайт не открылся
+        # (2026-10-07/08 og1.ru трижды так «обошёлся» с итогом «изменений нет»).
+        if previous_by_url and not crawl_result.pages:
+            raise SiteUnavailableError(competitor.base_url)
 
         diffs = diff_crawl(previous_texts, crawl_result.pages)
         run_at = datetime.now(UTC)
@@ -563,7 +583,7 @@ async def run_crawl_for_competitor(
             if quiet and not own_items and not is_baseline:
                 db.commit()
                 logger.info("Обход нашего сайта завершён: изменений нет")
-                return
+                return True
             await _notify(
                 notifier,
                 db,
@@ -576,7 +596,7 @@ async def run_crawl_for_competitor(
             )
             db.commit()
             logger.info("Обход нашего сайта завершён: %s изменений", len(own_items))
-            return
+            return True
 
         if is_baseline:
             message_parts = [format_baseline_finished(competitor.name, len(diffs), report_url)]
@@ -600,6 +620,19 @@ async def run_crawl_for_competitor(
         db.commit()
 
         logger.info("Обход конкурента %s завершён: %s изменений", competitor.name, len(prepared))
+        return True
+
+    except SiteUnavailableError as exc:
+        db.rollback()
+        competitor.last_crawl_finished_at = datetime.now(UTC)
+        db.add(competitor)
+        if not quiet:
+            await _notify(
+                notifier, db, competitor, format_unavailable_message(competitor.name, exc.url), page_change_id=None
+            )
+        db.commit()
+        logger.warning("Обход %s не состоялся: %s", competitor.name, exc)
+        return False
 
     except (ApifyCrawlError, CompetitorBlockedError) as exc:
         db.rollback()
@@ -612,6 +645,7 @@ async def run_crawl_for_competitor(
         await _notify(notifier, db, competitor, message, page_change_id=None)
         db.commit()
         logger.warning("Обход конкурента %s не удался: %s", competitor.name, exc)
+        return False
 
     except Exception as exc:
         db.rollback()
@@ -621,6 +655,7 @@ async def run_crawl_for_competitor(
         await _notify(notifier, db, competitor, message, page_change_id=None)
         db.commit()
         logger.exception("Непредвиденная ошибка при обходе конкурента %s", competitor.name)
+        return False
 
 
 async def _recheck_missing_pages(

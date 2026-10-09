@@ -10,21 +10,29 @@
 только в памяти планировщика: иначе каждый перезапуск сервиса отодвигал бы обход
 на полный интервал, и при перезапусках чаще раза в неделю он не наступал никогда.
 
+Если наш сайт не открылся (нет интернета, сайт лёг), его обход повторяется через
+OWN_SITE_RETRY_MINUTES, до OWN_SITE_RETRY_ATTEMPTS раз; конкуренты в плановом цикле
+ждут удачного обхода нашего сайта, а если не помог ни один повтор — обходятся со
+старым снимком. Раньше такой обход молча заканчивался «изменений нет» (2026-10-07/08).
+
 Сам запуск обходов планировщик не делает: он идёт через app/crawl_manager.py —
 там и защита от повторного запуска, и общий лимит одновременных обходов.
 """
 
 import logging
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import crawl_manager
 from app.config import settings
 from app.db import SessionLocal
 from app.models import Competitor, ScheduleConfig
+from app.notifications.telegram import TelegramNotifier, format_unavailable_message
 from app.own_site import get_own_site
 
 logger = logging.getLogger(__name__)
@@ -34,6 +42,10 @@ scheduler = AsyncIOScheduler()
 CYCLE_JOB_ID = "crawl_cycle"
 OWN_SITE_DAILY_JOB_ID = "own_site_daily"
 DIGEST_JOB_ID = "weekly_digest"
+CYCLE_RETRY_JOB_ID = "crawl_cycle_retry"
+OWN_SITE_DAILY_RETRY_JOB_ID = "own_site_daily_retry"
+
+_MOSCOW = ZoneInfo("Europe/Moscow")
 
 # Просроченный цикл (Мак спал, сервис лежал) запускается вскоре после старта —
 # не в первую же секунду, а когда сервис поднялся целиком.
@@ -84,17 +96,89 @@ def _show_next_run(db, next_run: datetime) -> None:
         db.add(competitor)
 
 
-async def run_crawl_cycle() -> None:
-    """Плановый цикл: наш сайт целиком, затем все конкуренты (кроме тех, что на паузе)."""
+async def _tell_owner(text: str) -> None:
+    try:
+        await TelegramNotifier().send(text)
+    except Exception:
+        logger.exception("Не удалось отправить уведомление в Telegram")
+
+
+def _schedule_retry(job_id: str, func, attempt: int) -> datetime:
+    """Разовый повтор через OWN_SITE_RETRY_MINUTES. Живёт только в памяти: при
+    перезапуске сервиса повтор пропадёт — но плановый цикл в этом случае и так
+    запустится заново (его время в БД не сдвигается, пока цикл не дошёл до конкурентов)."""
+    run_at = datetime.now(UTC) + timedelta(minutes=settings.own_site_retry_minutes)
+    scheduler.add_job(
+        func,
+        trigger=DateTrigger(run_date=run_at),
+        kwargs={"attempt": attempt},
+        id=job_id,
+        replace_existing=True,
+        misfire_grace_time=None,
+    )
+    return run_at
+
+
+def _retry_note(run_at: datetime, then: str) -> str:
+    return f"Попробую ещё раз в {run_at.astimezone(_MOSCOW):%H:%M} по Москве{then}."
+
+
+async def _crawl_own_site(
+    db, own: Competitor, *, attempt: int, retry_job_id: str, retry_func, then: str
+) -> bool | None:
+    """Обходит наш сайт.
+
+    True — обход прошёл (или уже шёл); False — сайт не открылся, повтор назначен и
+    владелец об этом знает; None — сайт не открылся, а повторы кончились."""
+    result = await crawl_manager.run_now(db, own, quiet=True)
+    if result is None:
+        logger.info("Обход нашего сайта уже идёт — новый не запускаем")
+        return True
+    if result:
+        return True
+
+    if attempt < settings.own_site_retry_attempts:
+        run_at = _schedule_retry(retry_job_id, retry_func, attempt + 1)
+        logger.warning("Наш сайт не открылся, повтор %s в %s", attempt + 1, run_at.isoformat())
+        await _tell_owner(format_unavailable_message(own.name, own.base_url, retry_note=_retry_note(run_at, then)))
+        return False
+
+    logger.warning("Наш сайт не открылся и после %s повторов", attempt)
+    return None
+
+
+async def run_crawl_cycle(attempt: int = 0) -> None:
+    """Плановый цикл: наш сайт целиком, затем все конкуренты (кроме тех, что на паузе).
+
+    attempt — номер повтора, если наш сайт в прошлый раз не открылся."""
     db = SessionLocal()
     try:
         own = get_own_site(db)
         if own is not None and not own.is_paused:
-            logger.info("Плановый цикл: обходим наш сайт")
-            if not await crawl_manager.run_now(db, own, quiet=True):
-                # Обход нашего сайта уже идёт (запущен вручную) — ждать его не будем:
-                # конкурентов сравним с тем, что уже сохранено.
-                logger.info("Плановый цикл: обход нашего сайта уже идёт — сразу к конкурентам")
+            logger.info("Плановый цикл: обходим наш сайт%s", f" (повтор {attempt})" if attempt else "")
+            own_ok = await _crawl_own_site(
+                db,
+                own,
+                attempt=attempt,
+                retry_job_id=CYCLE_RETRY_JOB_ID,
+                retry_func=run_crawl_cycle,
+                then=", конкурентов обойду после него",
+            )
+            if own_ok is False:
+                # Время цикла в БД не трогаем: если сервис перезапустят до повтора,
+                # просроченный цикл запустится заново, и конкуренты не потеряются.
+                return
+            if own_ok is None:
+                await _tell_owner(
+                    format_unavailable_message(
+                        own.name,
+                        own.base_url,
+                        retry_note=(
+                            f"Повторы ({attempt}) не помогли. Конкурентов обхожу сейчас, а сравниваю "
+                            "с прошлым снимком нашего сайта."
+                        ),
+                    )
+                )
             db.expire_all()
 
         result = crawl_manager.start_all(db)
@@ -118,19 +202,34 @@ async def run_crawl_cycle() -> None:
         db.close()
 
 
-async def run_own_site_daily() -> None:
+async def run_own_site_daily(attempt: int = 0) -> None:
     """Ежедневный обход нашего сайта — только новые и изменившиеся страницы (так
     устроен любой не полный обход, см. plan_crawl). Нужен, чтобы находки конкурента
     сравнивались с актуальным нашим сайтом, даже если обход конкурента запустили
-    вручную посреди недели. Пишет в Telegram, только если на сайте что-то поменялось."""
+    вручную посреди недели. Пишет в Telegram, только если на сайте что-то поменялось
+    или сайт не открылся."""
     db = SessionLocal()
     try:
         own = get_own_site(db)
         if own is None or own.is_paused:
             return
-        logger.info("Ежедневный обход нашего сайта")
-        if not await crawl_manager.run_now(db, own, quiet=True):
-            logger.info("Ежедневный обход нашего сайта пропущен: обход уже идёт")
+        logger.info("Ежедневный обход нашего сайта%s", f" (повтор {attempt})" if attempt else "")
+        own_ok = await _crawl_own_site(
+            db,
+            own,
+            attempt=attempt,
+            retry_job_id=OWN_SITE_DAILY_RETRY_JOB_ID,
+            retry_func=run_own_site_daily,
+            then="",
+        )
+        if own_ok is None:
+            await _tell_owner(
+                format_unavailable_message(
+                    own.name,
+                    own.base_url,
+                    retry_note=f"Повторы ({attempt}) не помогли. Следующая попытка — в обычное время завтра.",
+                )
+            )
     except Exception:
         logger.exception("Ежедневный обход нашего сайта завершился ошибкой")
     finally:
@@ -216,7 +315,9 @@ def schedule_digest() -> None:
         return
     scheduler.add_job(
         _run_digest,
-        trigger=CronTrigger(day_of_week=settings.digest_day_of_week, hour=settings.digest_hour),
+        trigger=CronTrigger(
+            day_of_week=settings.digest_day_of_week, hour=settings.digest_hour, timezone=settings.digest_timezone
+        ),
         id=DIGEST_JOB_ID,
         replace_existing=True,
     )

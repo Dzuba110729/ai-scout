@@ -290,3 +290,36 @@ def test_report_skips_minor_and_college_and_carries_overview(env, monkeypatch):
     assert summary.overview == "Конкурент снизил цены."
     assert "Мелких правок в отчёт не вошло: 1" in summary.counts
     assert "📝 Главное: Конкурент снизил цены." in state["sent"][-1][0]
+
+
+def test_site_that_returned_no_pages_is_a_failed_crawl_not_no_changes(env):
+    # 2026-10-07/08: og1.ru не открылся, обход не получил ни одной страницы — а итог
+    # был «изменений нет». Теперь это неудавшийся обход, данные не трогаются.
+    db, state = env
+    own = Competitor(name="Наш сайт", base_url="https://og1.ru", is_own=True, status=SessionStatus.ACTIVE)
+    db.add(own)
+    db.commit()
+    state["pages"] = {"https://og1.ru/ege": "ЕГЭ"}
+    _run(db, own)
+    sent_before = len(state["sent"])
+
+    state["pages"] = {}
+    ok = asyncio.run(pipeline.run_crawl_for_competitor(db, own, quiet=True))
+
+    assert ok is False
+    assert db.query(PageChange).count() == 0  # ни «удалённых», ни других находок
+    assert len(state["sent"]) == sent_before  # при quiet пишет планировщик, с временем повтора
+
+    ok = asyncio.run(pipeline.run_crawl_for_competitor(db, own))
+    assert ok is False
+    assert "не открылся" in state["sent"][-1][0]
+
+
+def test_successful_crawl_returns_true(env):
+    db, state = env
+    rival = Competitor(name="Фоксфорд", base_url="https://foxford.ru", status=SessionStatus.ACTIVE)
+    db.add(rival)
+    db.commit()
+    state["pages"] = {"https://foxford.ru/a": "текст"}
+
+    assert asyncio.run(pipeline.run_crawl_for_competitor(db, rival)) is True

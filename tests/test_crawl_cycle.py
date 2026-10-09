@@ -100,3 +100,81 @@ def test_daily_own_site_job_runs_at_moscow_hour():
         assert "hour='5'" in str(job.trigger)
     finally:
         scheduler_module.scheduler.remove_all_jobs()
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    messages = []
+
+    async def fake_tell(text):
+        messages.append(text)
+
+    monkeypatch.setattr(scheduler_module, "_tell_owner", fake_tell)
+    yield messages
+    scheduler_module.scheduler.remove_all_jobs()
+
+
+def test_cycle_waits_for_own_site_and_retries_when_it_did_not_open(db, monkeypatch, sent):
+    competitors_started = []
+
+    async def failed_run_now(_db, competitor, quiet=False):
+        return False
+
+    monkeypatch.setattr(scheduler_module.crawl_manager, "run_now", failed_run_now)
+    monkeypatch.setattr(
+        scheduler_module.crawl_manager, "start_all", lambda _db: competitors_started.append(1)
+    )
+    saved_next_run = scheduler_module.get_schedule_config(db).next_run_at
+
+    asyncio.run(scheduler_module.run_crawl_cycle())
+
+    assert competitors_started == []  # конкуренты ждут удачного обхода нашего сайта
+    job = scheduler_module.scheduler.get_job(scheduler_module.CYCLE_RETRY_JOB_ID)
+    assert job is not None and job.kwargs == {"attempt": 1}
+    assert "Попробую ещё раз" in sent[-1] and "конкурентов обойду после него" in sent[-1]
+    # время цикла в БД не сдвинулось: при перезапуске сервиса цикл запустится заново
+    db.expire_all()
+    assert scheduler_module.get_schedule_config(db).next_run_at == saved_next_run
+
+
+def test_cycle_crawls_competitors_after_last_failed_retry(db, monkeypatch, sent):
+    competitors_started = []
+
+    async def failed_run_now(_db, competitor, quiet=False):
+        return False
+
+    def fake_start_all(_db):
+        competitors_started.append(1)
+        return scheduler_module.crawl_manager.CrawlAllResult(started=1, skipped_running=0, skipped_paused=0)
+
+    monkeypatch.setattr(scheduler_module.crawl_manager, "run_now", failed_run_now)
+    monkeypatch.setattr(scheduler_module.crawl_manager, "start_all", fake_start_all)
+    monkeypatch.setattr(scheduler_module.settings, "own_site_retry_attempts", 3)
+
+    asyncio.run(scheduler_module.run_crawl_cycle(attempt=3))
+
+    assert competitors_started == [1]
+    assert scheduler_module.scheduler.get_job(scheduler_module.CYCLE_RETRY_JOB_ID) is None
+    assert "с прошлым снимком" in sent[-1]
+
+
+def test_daily_run_retries_own_site_that_did_not_open(db, monkeypatch, sent):
+    async def failed_run_now(_db, competitor, quiet=False):
+        return False
+
+    monkeypatch.setattr(scheduler_module.crawl_manager, "run_now", failed_run_now)
+
+    asyncio.run(scheduler_module.run_own_site_daily())
+
+    job = scheduler_module.scheduler.get_job(scheduler_module.OWN_SITE_DAILY_RETRY_JOB_ID)
+    assert job is not None and job.kwargs == {"attempt": 1}
+    assert "Попробую ещё раз" in sent[-1]
+
+
+def test_digest_runs_at_moscow_hour():
+    scheduler_module.schedule_digest()
+    try:
+        job = scheduler_module.scheduler.get_job(scheduler_module.DIGEST_JOB_ID)
+        assert str(job.trigger.timezone) == "Europe/Moscow"
+    finally:
+        scheduler_module.scheduler.remove_all_jobs()
