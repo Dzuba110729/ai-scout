@@ -163,6 +163,9 @@ class Page(Base):
     structure: Mapped["PageStructureRecord | None"] = relationship(
         back_populates="page", cascade="all, delete-orphan", uselist=False
     )
+    intent: Mapped["ArticleIntent | None"] = relationship(
+        back_populates="page", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class PageStructureRecord(Base):
@@ -188,6 +191,32 @@ class PageStructureRecord(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     page: Mapped["Page"] = relationship(back_populates="structure")
+
+
+class ArticleIntent(Base):
+    """Карточка интента статьи (app/ai/intent.py): о чём статья и под какой запрос.
+
+    Одна на страницу; пересчитывается, только когда меняется содержимое статьи —
+    content_hash считается по H1, оглавлению и основному тексту (intent_content_hash).
+    """
+
+    __tablename__ = "article_intents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), unique=True)
+    content_hash: Mapped[str] = mapped_column(Text)
+    topic: Mapped[str] = mapped_column(Text)
+    main_intent: Mapped[str] = mapped_column(Text)
+    subintents: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    entities: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # [[сущность, связь, сущность], …] — упрощённый граф сущностей
+    relations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    material_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    page: Mapped["Page"] = relationship(back_populates="intent")
 
 
 class PageSnapshot(Base):

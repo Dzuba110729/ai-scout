@@ -97,6 +97,7 @@ from app.notifications.telegram import (
     report_buttons,
 )
 from app.own_site import load_own_site
+from app.seo import format_seo_note, process_info_articles
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +372,22 @@ def _retire_stale_section_pages(
             continue
         page.is_removed = True
         page.removed_at = now
+
+
+def _info_articles_for_seo(
+    diffs: list[PageDiff],
+    pages_by_url: dict[str, tuple[Page, str]],
+    structures: dict[str, PageStructure],
+) -> list[tuple[Page, PageStructure]]:
+    """Новые и изменённые статьи этого обхода, у которых есть свежая структура."""
+    return [
+        (pages_by_url[d.url][0], structures[d.url])
+        for d in diffs
+        if d.change_type in (ChangeType.NEW, ChangeType.CHANGED)
+        and is_info_url(d.url)
+        and d.url in structures
+        and d.url in pages_by_url
+    ]
 
 
 def _section_of(url: str) -> str:
@@ -727,7 +744,19 @@ async def run_crawl_for_competitor(
             competitor.status = SessionStatus.ACTIVE
             db.add(competitor)
 
+        db.flush()
+        await asyncio.to_thread(_save_structures, db, competitor.id, crawl_result.structures, previous_by_url)
+        # SEO-разбор новых и изменённых статей (карточки интента). В точке отсчёта
+        # находок нет — разбирать нечего, все статьи доберёт стартовый аудит.
+        seo_result = await process_info_articles(
+            db,
+            [] if is_baseline else _info_articles_for_seo(diffs, previous_by_url, crawl_result.structures),
+            is_own=competitor.is_own,
+        )
+
         notes = build_run_notes(crawl_result, checks)
+        if seo_note := format_seo_note(seo_result):
+            notes.append(seo_note)
         if section_diffs:
             notes.append(format_new_sections_note([d.url for d in section_diffs]))
 
@@ -768,9 +797,6 @@ async def run_crawl_for_competitor(
             if report_url:
                 competitor.last_report_url = report_url
                 competitor.last_report_at = run_at
-
-        db.flush()
-        await asyncio.to_thread(_save_structures, db, competitor.id, crawl_result.structures, previous_by_url)
 
         competitor.last_crawl_finished_at = now
         if force_full:

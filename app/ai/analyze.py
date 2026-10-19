@@ -197,7 +197,9 @@ def parse_ai_response(raw_text: str) -> AiAnalysisResult:
     )
 
 
-async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cwd: str | None = None) -> str:
+async def _run_claude_cli_once(
+    prompt: str, extra_args: tuple[str, ...] = (), cwd: str | None = None, timeout: float | None = None
+) -> str:
     if _limit_pause_left():
         raise ClaudeLimitError(f"лимит подписки Claude, пауза ещё {int(_limit_pause_left() // 60) + 1} мин")
     process = await asyncio.create_subprocess_exec(
@@ -215,7 +217,7 @@ async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cw
     )
     try:
         stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=settings.claude_cli_timeout_seconds
+            process.communicate(), timeout=timeout or settings.claude_cli_timeout_seconds
         )
     except asyncio.TimeoutError:
         process.kill()
@@ -236,13 +238,18 @@ async def _run_claude_cli_once(prompt: str, extra_args: tuple[str, ...] = (), cw
 
 
 async def run_claude_cli(
-    prompt: str, *, retries: int = 1, extra_args: tuple[str, ...] = (), cwd: str | None = None
+    prompt: str,
+    *,
+    retries: int = 1,
+    extra_args: tuple[str, ...] = (),
+    cwd: str | None = None,
+    timeout: float | None = None,
 ) -> str:
     """Запускает `claude -p` headless, с одним ретраем при временной недоступности."""
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            return await _run_claude_cli_once(prompt, extra_args, cwd)
+            return await _run_claude_cli_once(prompt, extra_args, cwd, timeout)
         except ClaudeLimitError:
             raise
         except ClaudeCliError as exc:

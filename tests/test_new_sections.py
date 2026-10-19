@@ -15,12 +15,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import pipeline
+from app import pipeline, seo
 from app.ai.analyze import AiAnalysisResult
+from app.ai.intent import IntentCard
 from app.crawler.crawl import CrawlResult
 from app.crawler.structure import PageStructure
 from app.db import Base
-from app.models import ChangeType, Competitor, Page, PageChange, PageStructureRecord, SessionStatus
+from app.models import (
+    ArticleIntent,
+    ChangeType,
+    Competitor,
+    Page,
+    PageChange,
+    PageStructureRecord,
+    SessionStatus,
+)
 
 SITE = "https://skysmart.ru"
 
@@ -207,3 +216,31 @@ def test_note_lists_several_opened_sections():
     note = pipeline.format_new_sections_note(urls)
 
     assert note.startswith("Начали следить за разделами: /wiki — 3 стр., /blog — 1 стр.")
+
+
+def test_crawl_gives_cards_to_new_and_changed_articles_only(env, monkeypatch):
+    db, state = env
+    calls: list = []
+
+    async def fake_cards(articles):
+        calls.append([a.url for a in articles])
+        return [IntentCard(topic="Тема", main_intent="узнать") for _ in articles]
+
+    monkeypatch.setattr(seo, "make_intent_cards", fake_cards)
+    rival = Competitor(name="Skysmart", base_url="https://skysmart.ru")
+    db.add(rival)
+    db.commit()
+    article, course = "https://skysmart.ru/articles/a", "https://skysmart.ru/courses/c"
+    state["pages"] = {article: "статья", course: "курс"}
+    state["structures"] = {article: PageStructure(h1="H", main_text="т"), course: PageStructure(h1="H", main_text="т")}
+    _run(db, rival)
+    assert calls == []  # первый обход — точка отсчёта, разбирать нечего
+
+    new_article = "https://skysmart.ru/articles/new"
+    state["pages"].update({new_article: "новая статья", course: "курс со скидкой"})
+    state["structures"] = {new_article: PageStructure(h1="Новая", main_text="Новая статья"), course: PageStructure(h1="H", main_text="т")}
+    _run(db, rival)
+
+    assert calls == [[new_article]]  # коммерческая страница карточку не получает
+    assert db.query(ArticleIntent).one().page.url == new_article
+    assert any("SEO: разобрано инфостатей" in note for note in state["reports"][-1][1])

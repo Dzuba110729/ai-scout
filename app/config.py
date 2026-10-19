@@ -135,6 +135,27 @@ class Settings(BaseSettings):
     # упереться в лимиты подписки Claude (решение владельца 2026-09-25: до 50).
     own_site_baseline_compare_max: int = 50
 
+    # SEO-разбор инфостатей (обратная связь SEO-специалиста 2026-10-19, этапы 3–5).
+    # Карточка интента статьи (app/ai/intent.py) — один вызов `claude -p` на пачку из
+    # seo_intent_batch_size статей; за обход — не больше seo_intent_max_per_run статей
+    # (новые и изменённые инфостатьи конкурента и нашего сайта). Остальное доберёт
+    # стартовый аудит (scripts/seo_audit.py).
+    seo_enabled: bool = True
+    seo_intent_max_per_run: int = 30
+    seo_intent_batch_size: int = 4
+    seo_intent_text_limit: int = 2500
+    # Сравнение со своими статьями (app/ai/topic_match.py): кандидаты без ИИ (TF-IDF),
+    # потом один вызов на пачку из seo_compare_batch_size статей конкурента.
+    seo_compare_max_per_run: int = 30
+    seo_compare_batch_size: int = 3
+    seo_compare_candidates: int = 3
+    seo_compare_text_limit: int = 1200
+    # Насколько похожа новая тема на уже разобранную (0..1), чтобы склеить их в одну
+    # запись без вызова ИИ: одна тема у нескольких конкурентов = одна строка таблицы.
+    seo_topic_merge_threshold: float = 0.55
+    # Сколько ждать ответа CLI на пачку статей — дольше, чем на одну находку.
+    seo_cli_timeout_seconds: int = 300
+
     # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
     # digest_timezone, а не по поясу Мака (Мак стоит на тихоокеанском времени, и
     # «10 утра» превращалось в 20:00 по Москве). digest_days — за сколько дней
