@@ -215,6 +215,7 @@ def test_info_sections_of_all_tracked_sites():
         "https://og1.ru/polza/test-na-gotovnost",
         "https://og1.ru/novosti/x",
         "https://og1.ru/novosti-obrazovaniya/x",
+        "https://og1.ru/videouroki/khimiya/11-klass-hi/dispersionnye-sistemy",
     ):
         assert is_info_url(url), url
     for url in ("https://skysmart.ru/courses/ege", "https://foxford.ru/catalog/x", "https://og1.ru/kursy/ege"):

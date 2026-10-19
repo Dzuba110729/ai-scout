@@ -26,7 +26,7 @@ CONTENT_KIND_LABELS = {
 }
 
 _INFO_PATH_RE = re.compile(
-    r"/(?:articles?|blog|news|novosti[\w-]*|media|journal|zhurnal|wiki|polza|poleznoe|questions?|"
+    r"/(?:articles?|blog|news|novosti[\w-]*|media|journal|zhurnal|wiki|polza|poleznoe|videouroki|questions?|"
     r"voprosy|glossary|slovar\w*|terminy|encyclopedia|enciklopediya|spravochnik|stat[iy]a?|stati|"
     r"sovety|chek-?listy?|checklists?|baza-znanij|knowledge|faq|testy?|quiz)(?:/|$)",
     re.IGNORECASE,
