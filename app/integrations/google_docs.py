@@ -26,7 +26,9 @@ from googleapiclient.errors import HttpError
 from app.ai.analyze import AiAnalysisResult
 from app.ai.compare import ComparisonResult
 from app.config import settings
+from app.content_kind import CONTENT_KIND_LABELS, content_kind
 from app.crawler.diff import ChangeType, PageDiff
+from app.crawler.sitewide import SitewideGroup
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ _HEADER = [
     "Тип изменения",
     "URL",
     "Категория",
+    "Для кого",
     "УТП (чем конкурент выделяется)",
     "Призыв к действию",
     "Описание (ИИ)",
@@ -57,6 +60,7 @@ _CHANGE_TYPE_LABELS = {
 }
 
 _MOVED_LABEL = "Страница переехала"
+SITEWIDE_LABEL = "Сквозное изменение"
 
 # Вторая строка в колонке «Тип изменения». Для «средне» пометки нет — чтобы
 # глаз цеплялся только за важное и за то, что можно пропустить.
@@ -70,13 +74,14 @@ _IMPORTANCE_LABELS = {
 # (УТП, описание) становятся нечитаемо узкими рядом с короткими (Дата, Категория) —
 # ровно то, что видно на скриншоте нечитаемого отчёта.
 _COLUMN_WIDTH_WEIGHTS = [
-    0.08,  # Дата
+    0.07,  # Дата
     0.09,  # Тип изменения
     0.13,  # URL
     0.07,  # Категория
-    0.15,  # УТП (чем конкурент выделяется)
-    0.09,  # Призыв к действию
-    0.20,  # Описание (ИИ)
+    0.07,  # Для кого
+    0.14,  # УТП (чем конкурент выделяется)
+    0.07,  # Призыв к действию
+    0.17,  # Описание (ИИ)
     0.10,  # Есть ли такое у нас
     0.09,  # Чем отличается и чего нам не хватает
 ]
@@ -123,16 +128,60 @@ def build_row(
     if importance_label:
         type_cell = f"{type_cell}\n{importance_label}"
 
+    category = (analysis.category if analysis else "") or ""
     return [
         detected_at.strftime("%Y-%m-%d\n%H:%M"),
         type_cell,
         page_diff.url,
-        (analysis.category if analysis else "") or "",
+        category,
+        CONTENT_KIND_LABELS[content_kind(page_diff.url, category)],
         (analysis.usp if analysis else "") or "",
         (analysis.cta if analysis else "") or "",
         "\n".join(part for part in summary_parts if part),
         _comparison_verdict_cell(comparison),
         _comparison_details_cell(comparison),
+    ]
+
+
+_SITEWIDE_URL_EXAMPLES = 3
+
+
+def build_sitewide_row(group: SitewideGroup, analysis: AiAnalysisResult | None, detected_at: datetime) -> list[str]:
+    """Строка отчёта для сквозного изменения: одна на блок, а не по строке на страницу.
+
+    В «URL» — страница, которую блок рекламирует (если ИИ её нашёл среди новых), и
+    пара примеров страниц, где блок появился.
+    """
+    related = analysis.raw_response.get("related_url") if analysis else None
+    url_parts = []
+    if isinstance(related, str) and related.startswith("http"):
+        url_parts.append(f"Ведёт на: {related}")
+    url_parts.append("Примеры:")
+    url_parts.extend(group.urls[:_SITEWIDE_URL_EXAMPLES])
+    if len(group.urls) > _SITEWIDE_URL_EXAMPLES:
+        url_parts.append(f"и ещё {len(group.urls) - _SITEWIDE_URL_EXAMPLES}")
+
+    summary_parts = [(analysis.summary if analysis else "") or "Блок изменился на многих страницах сразу."]
+    if analysis and analysis.importance == "high" and analysis.importance_reason:
+        summary_parts.append(f"Почему важно: {analysis.importance_reason}")
+
+    type_cell = f"{SITEWIDE_LABEL}\nна {len(group.urls)} стр."
+    importance_label = _IMPORTANCE_LABELS.get(analysis.importance) if analysis else None
+    if importance_label:
+        type_cell = f"{type_cell}\n{importance_label}"
+
+    category = (analysis.category if analysis else "") or ""
+    return [
+        detected_at.strftime("%Y-%m-%d\n%H:%M"),
+        type_cell,
+        "\n".join(url_parts),
+        category,
+        CONTENT_KIND_LABELS[content_kind(group.urls[0], category)],
+        (analysis.usp if analysis else "") or "",
+        (analysis.cta if analysis else "") or "",
+        "\n".join(summary_parts),
+        "",
+        "",
     ]
 
 

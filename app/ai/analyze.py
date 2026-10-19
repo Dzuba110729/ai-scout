@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.crawler.diff import ChangeType, PageDiff
+from app.crawler.sitewide import SitewideGroup
 
 logger = logging.getLogger(__name__)
 
@@ -75,10 +76,11 @@ IMPORTANCE_CRITERIA = (
     "Оценка важности для отдела маркетинга (importance):\n"
     "- high: цены, скидки, акции, новый продукт/курс/тариф/направление, новый оффер или лендинг\n"
     "  под рекламу, смена УТП или гарантий, удаление продукта или целого направления;\n"
-    "- medium: заметная переработка текста/структуры продающей страницы, новые отзывы/кейсы,\n"
+    "- medium: заметная переработка текста/структуры продающей страницы, новые кейсы,\n"
     "  новые преподаватели, новая статья по ключевой для школы теме;\n"
     "- low: мелкие правки текста, даты, опечатки, служебные и юридические страницы, блог\n"
     "  на второстепенную тему, технические изменения без смысла для клиента;\n"
+    "  новые отзывы, рост числа отзывов или рейтинга, смена отзывов в карусели;\n"
     "  всё про колледж/СПО/техникум — у нашей школы таких программ нет.\n"
 )
 
@@ -95,6 +97,19 @@ def importance_rank(importance: str | None) -> int:
     return {"high": 0, "medium": 1, "low": 2}.get(importance or "medium", 1)
 
 
+# Поля ответа, общие для разбора страницы и сквозного блока. Описание — коротко:
+# SEO-специалист просил «покороче, чем сейчас» (обратная связь 2026-10-19).
+_ANSWER_FIELDS = (
+    '  "category": "тип: лендинг/оффер/цены/курс/статья/новость/чек-лист/тест/другое",\n'
+    '  "usp": "что конкретно появилось или поменялось, до 10 слов (например: «добавлен раздел '
+    'Советы по сдаче», «скидка 30% при оплате полностью»), иначе null",\n'
+    '  "cta": "текст призыва к действию, если есть, иначе null",\n'
+    '  "summary": "одно короткое предложение, до 20 слов: суть изменения на русском",\n'
+    '  "importance": "high | medium | low",\n'
+    '  "importance_reason": "одно короткое предложение: почему такая важность"\n'
+)
+
+
 def build_prompt(page_diff: PageDiff) -> str:
     if page_diff.change_type is ChangeType.NEW:
         content = page_diff.new_text or ""
@@ -102,6 +117,13 @@ def build_prompt(page_diff: PageDiff) -> str:
     elif page_diff.change_type is ChangeType.REMOVED:
         content = page_diff.old_text or ""
         context_line = "Эта страница конкурента была удалена."
+    elif page_diff.own_diff_text is not None:
+        content = page_diff.own_diff_text
+        context_line = (
+            "На странице конкурента произошли изменения. Общие для многих страниц сайта (баннеры, "
+            "акции, меню) разобраны отдельно — ниже только то, что поменялось именно на этой "
+            "странице: «+» добавлено, «-» убрано."
+        )
     else:
         content = page_diff.diff_text or ""
         context_line = "На странице конкурента произошли изменения (unified diff, было/стало)."
@@ -118,14 +140,37 @@ def build_prompt(page_diff: PageDiff) -> str:
         "```\n\n"
         f"{IMPORTANCE_CRITERIA}\n"
         "Верни СТРОГО один JSON-объект (без пояснений вне JSON) со следующими полями:\n"
-        '{\n'
-        '  "category": "тип страницы: лендинг/оффер/цены/статья/другое",\n'
-        '  "usp": "ключевое УТП или выгода, если есть, иначе null",\n'
-        '  "cta": "текст призыва к действию, если есть, иначе null",\n'
-        '  "summary": "1-2 предложения о сути изменения на русском",\n'
-        '  "importance": "high | medium | low",\n'
-        '  "importance_reason": "одно короткое предложение: почему такая важность"\n'
-        '}\n'
+        "{\n"
+        f"{_ANSWER_FIELDS}"
+        "}\n"
+    )
+
+
+_SITEWIDE_EXAMPLES = 5
+_SITEWIDE_NEW_PAGES_LIMIT = 30
+
+
+def build_sitewide_prompt(group: SitewideGroup, new_page_urls: list[str]) -> str:
+    """Промпт для сквозного изменения: один блок поменялся сразу на многих страницах."""
+    examples = "\n".join(group.urls[:_SITEWIDE_EXAMPLES])
+    new_pages = "\n".join(new_page_urls[:_SITEWIDE_NEW_PAGES_LIMIT]) or "нет"
+    return (
+        "Ты аналитик, который отслеживает сайт конкурента для отдела маркетинга.\n"
+        f"Одно и то же изменение появилось сразу на {len(group.urls)} страницах конкурента — это "
+        "сквозной блок (баннер, акция, блок курсов, меню). Опиши его ОДИН раз, как одно событие.\n"
+        f"Примеры страниц:\n{examples}\n\n"
+        "Строки блока («+» добавлено, «-» убрано; в скобках — на скольких страницах, если не на всех):\n"
+        "```\n"
+        f"{group.diff_text[:8000]}\n"
+        "```\n\n"
+        "Новые страницы конкурента, найденные в этом же обходе. Если блок рекламирует одну из них "
+        f"(например, новый курс), укажи её в related_url:\n{new_pages}\n\n"
+        f"{IMPORTANCE_CRITERIA}\n"
+        "Верни СТРОГО один JSON-объект (без пояснений вне JSON) со следующими полями:\n"
+        "{\n"
+        f"{_ANSWER_FIELDS.rstrip()},\n"
+        '  "related_url": "адрес новой страницы, на которую ведёт блок, из списка выше, иначе null"\n'
+        "}\n"
     )
 
 
@@ -207,6 +252,11 @@ async def run_claude_cli(
                 await asyncio.sleep(5 * 2**attempt)
     assert last_error is not None
     raise last_error
+
+
+async def analyze_sitewide_group(group: SitewideGroup, new_page_urls: list[str]) -> AiAnalysisResult:
+    raw_text = await run_claude_cli(build_sitewide_prompt(group, new_page_urls))
+    return parse_ai_response(raw_text)
 
 
 async def analyze_page_change(page_diff: PageDiff) -> AiAnalysisResult:

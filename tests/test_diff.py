@@ -1,9 +1,13 @@
+import pytest
+
 from app.crawler.diff import (
     ChangeType,
     content_hash,
     diff_crawl,
     extract_text,
+    normalize_for_compare,
     strip_related_blocks,
+    strip_review_blocks,
 )
 
 
@@ -156,3 +160,73 @@ def test_countdown_timer_and_reading_time_are_not_changes():
     new = "Уже идёт 21 день, но можно присоединиться\n04:56\nдня\n13 мин\nЦена 2 990 ₽"
 
     assert diff_crawl({"/a": old}, {"/a": new}) == []
+
+
+def _review_card(initial: str, author: str, date: str, text: str, teacher: str) -> str:
+    return f"{initial}\n{author}\n{date}\n5\n{text}\nОтзыв о преподавателе\n{teacher}\nна курс\nМатематика 5 класс"
+
+
+def _course_page(cards: list[str]) -> str:
+    return "\n".join(
+        [
+            "Математика для 5 класса",
+            "Цена 990 ₽",
+            "Отзывы о преподавателях, ведущих курсы",
+            "5.0",
+            "26 684",
+            "оценки",
+            *cards,
+            "Показать ещё отзывы",
+            "Как проходит обучение",
+        ]
+    )
+
+
+def test_review_carousel_is_noise():
+    old = _course_page(
+        [
+            _review_card("С", "Софа", "18 октября 2026", "Отличный учитель", "Наталье"),
+            _review_card("Д", "Даниил", "10 октября 2026", "Всё понятно", "Полине"),
+        ]
+    )
+    new = _course_page(
+        [
+            _review_card("П", "Павел", "19 октября 2026", "очень добрая,\nвсегда выслушает,\nпомогает", "Елене"),
+            _review_card("М", "Мария", "17 октября 2026", "Спасибо", "Олегу"),
+            _review_card("А", "Аноним", "16 октября 2026", "Супер", "Анне"),
+        ]
+    )
+
+    assert normalize_for_compare(old) == normalize_for_compare(new)
+    assert "Как проходит обучение" in normalize_for_compare(new)
+    assert "Отзыв о преподавателе" not in normalize_for_compare(new)
+    assert diff_crawl({"u": old}, {"u": new}) == []
+
+
+def test_change_next_to_review_carousel_is_still_seen():
+    cards = [
+        _review_card("С", "Софа", "18 октября 2026", "Отличный учитель", "Наталье"),
+        _review_card("Д", "Даниил", "10 октября 2026", "Всё понятно", "Полине"),
+    ]
+    old = _course_page(cards)
+    new = old.replace("Цена 990 ₽", "Цена 1290 ₽")
+
+    assert [d.change_type for d in diff_crawl({"u": old}, {"u": new})] == [ChangeType.CHANGED]
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("5,0\n·\n1476\nотзывов", "5,0\n·\n1503\nотзыва"),
+        ("Курс\n1 476 отзывов", "Курс\n1 503 отзыва"),
+        ("Курс\nОтзывы (1476)", "Курс\nОтзывы (1503)"),
+    ],
+)
+def test_review_counters_are_noise(old, new):
+    assert normalize_for_compare(old) == normalize_for_compare(new)
+
+
+def test_single_date_after_reviews_heading_is_kept():
+    text = "Отзывы родителей\nСтарт курса\n1 ноября 2026\nЗаписаться"
+
+    assert strip_review_blocks(text) == text

@@ -11,7 +11,7 @@
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -22,6 +22,7 @@ from app.ai.analyze import (
     AiAnalysisResult,
     ClaudeCliError,
     analyze_page_change,
+    analyze_sitewide_group,
     importance_rank,
     parse_ai_response,
     run_claude_cli,
@@ -30,6 +31,7 @@ from app.ai.backfill import backfill_missing_analyses
 from app.ai.compare import VERDICT_NONE, ComparisonResult, OwnSite, compare_with_own_site
 from app.ai.run_overview import OverviewItem, write_run_overview
 from app.config import STORAGE_STATE_DIR, settings
+from app.content_kind import INFO, content_kind
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import (
     launch_browser,
@@ -50,11 +52,14 @@ from app.crawler.crawl import (
 )
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
+from app.crawler.sitewide import SitewideGroup, SitewideSplit, find_sitewide_changes
 from app.integrations.google_docs import (
+    SITEWIDE_LABEL,
     GoogleDocsClient,
     GoogleDocsError,
     ReportSummary,
     build_row,
+    build_sitewide_row,
 )
 from app.models import (
     AiAnalysis,
@@ -423,10 +428,22 @@ async def run_crawl_for_competitor(
         for url, check in checks.items():
             _apply_missing_check(previous_by_url[url][0], check, now)
 
+        # Один и тот же блок (баннер, акция) поменялся на десятках страниц — это одна
+        # находка «сквозное изменение», а не десятки строк отчёта и вызовов ИИ.
+        # В первом обходе изменений нет — искать нечего.
+        sitewide = (
+            await asyncio.to_thread(find_sitewide_changes, diffs, settings.sitewide_min_pages)
+            if previous_by_url
+            else SitewideSplit()
+        )
+
         own_site = await _load_own_site_for_comparison(db, competitor)
         compare_urls: set[str] = set()
         if own_site:
-            selected = select_diffs_for_comparison(diffs, settings.own_site_compare_max_per_run)
+            selected = select_diffs_for_comparison(
+                [d for d in diffs if not sitewide.is_fully_sitewide(d.url)],
+                settings.own_site_compare_max_per_run,
+            )
             compare_urls = {d.url for d in selected}
 
         # Подготовка (быстрая работа с БД) — строго последовательно: page_change.id
@@ -437,7 +454,6 @@ async def run_crawl_for_competitor(
         # лента, забитая мусором. Поэтому первый обход — только точка отсчёта: страницы
         # и их текст сохраняем, находками не считаем.
         is_baseline = not previous_by_url
-        diffs_by_url = {d.url: d for d in diffs}
         prepared: list[tuple[PageDiff, Page, PageChange, str | None]] = []
         for page_diff in diffs:
             page = _apply_page_diff(db, competitor, page_diff, previous_by_url, crawl_result.sitemap_lastmod)
@@ -466,10 +482,17 @@ async def run_crawl_for_competitor(
 
         analyses = await asyncio.gather(
             *(
-                _limited(_analyze_and_store(db, page_change, page_diff))
+                _no_analysis()
+                if sitewide.is_fully_sitewide(page_diff.url)
+                else _limited(_analyze_and_store(db, page_change, _diff_for_ai(page_diff, sitewide)))
                 for page_diff, _page, page_change, _moved in prepared
             )
         )
+        new_page_urls = [d.url for d in diffs if d.change_type is ChangeType.NEW]
+        group_analyses = await asyncio.gather(
+            *(_limited(_analyze_sitewide(group, new_page_urls)) for group in sitewide.groups)
+        )
+        _store_sitewide_member_analyses(db, prepared, sitewide, group_analyses)
         comparisons_by_item = await asyncio.gather(
             *(
                 _limited(_compare_with_own_site_and_store(db, page_change, page_diff, own_site))
@@ -486,6 +509,8 @@ async def run_crawl_for_competitor(
         for (page_diff, page, _page_change, moved), analysis, comparison in zip(
             prepared, analyses, comparisons_by_item, strict=True
         ):
+            if sitewide.is_fully_sitewide(page_diff.url):
+                continue  # вся правка страницы — сквозной блок, он ниже одной строкой
             findings.append(RunFinding(page_diff, moved, analysis, comparison))
             if comparison:
                 comparisons.append((page_diff.url, comparison))
@@ -506,6 +531,17 @@ async def run_crawl_for_competitor(
                         comparison=comparison,
                     ),
                 )
+            )
+        diffs_by_url = {d.url: d for d in diffs}
+        for group, analysis in zip(sitewide.groups, group_analyses, strict=True):
+            finding = RunFinding(diffs_by_url[group.urls[0]], None, analysis, None, sitewide=group)
+            findings.append(finding)
+            if analysis and analysis.importance == "high":
+                important.append((finding.url, analysis))
+            if _is_minor(analysis):
+                continue
+            ranked_rows.append(
+                (importance_rank(analysis.importance if analysis else None), build_sitewide_row(group, analysis, run_at))
             )
         # Важное — в начало отчёта; внутри одной важности порядок прежний (sort стабилен).
         report_rows = [row for _rank, row in sorted(ranked_rows, key=lambda item: item[0])]
@@ -577,8 +613,10 @@ async def run_crawl_for_competitor(
             # Наш сайт обходят по кнопке «обойти наш сайт», чтобы проверить, что на нём
             # поменялось, — итог нужен так же, как по конкуренту, но в своём виде.
             own_items = [
-                (page_diff, analysis)
-                for (page_diff, _page, _change, _moved), analysis in zip(prepared, analyses, strict=True)
+                (finding.page_diff, _sitewide_member_analysis(finding.sitewide, finding.analysis))
+                if finding.sitewide
+                else (finding.page_diff, finding.analysis)
+                for finding in findings
             ]
             if quiet and not own_items and not is_baseline:
                 db.commit()
@@ -753,6 +791,20 @@ class RunFinding:
     moved_to: str | None
     analysis: AiAnalysisResult | None
     comparison: ComparisonResult | None
+    # Сквозное изменение: page_diff — одна из его страниц, сам блок — здесь.
+    sitewide: SitewideGroup | None = None
+
+    @property
+    def url(self) -> str:
+        """Куда вести из сводки: на страницу, которую блок рекламирует, иначе на саму страницу."""
+        related = self.analysis.raw_response.get("related_url") if self.sitewide and self.analysis else None
+        if isinstance(related, str) and related.startswith("http"):
+            return related
+        return self.page_diff.url
+
+    @property
+    def content_kind(self) -> str:
+        return content_kind(self.page_diff.url, self.analysis.category if self.analysis else None)
 
 
 SUMMARY_LIST_LIMIT = 5
@@ -770,6 +822,8 @@ def _is_minor(analysis: AiAnalysisResult | None) -> bool:
 
 
 def _finding_label(finding: RunFinding) -> str:
+    if finding.sitewide:
+        return SITEWIDE_LABEL
     return "Страница переехала" if finding.moved_to else _FINDING_KIND_LABELS[finding.page_diff.change_type]
 
 
@@ -794,12 +848,15 @@ def _findings_count_line(findings: list[RunFinding]) -> str:
         "Изменение": "изменений",
         "Страница удалена": "удалено",
         "Страница переехала": "переехало",
+        SITEWIDE_LABEL: "сквозных изменений (одно на много страниц)",
     }
     parts = [f"{names[label]} — {counts[label]}" for label in names if counts.get(label)]
     line = "Найдено: " + ", ".join(parts) + "."
     high = sum(1 for f in findings if f.analysis and f.analysis.importance == "high")
     if high:
         line += f" Из них важных 🔥 — {high}."
+    info = sum(1 for f in findings if f.content_kind == INFO)
+    line += f" Для SEO (инфо) — {info}, для продукта (коммерция) — {len(findings) - info}."
     return line
 
 
@@ -830,12 +887,12 @@ def build_report_summary(
             counts += f" Мелких правок в отчёт не вошло: {minor} (они есть в ленте бота)."
 
     important = [
-        (_short(f.analysis.importance_reason or f.analysis.summary), f.page_diff.url)
+        (_short(f.analysis.importance_reason or f.analysis.summary), f.url)
         for f in findings
         if f.analysis and f.analysis.importance == "high"
     ]
     missing = [
-        (_short(f.analysis.summary if f.analysis else None), f.page_diff.url)
+        (_short(f.analysis.summary if f.analysis else None), f.url)
         for f in _by_importance(findings)
         if f.comparison and f.comparison.verdict == VERDICT_NONE
     ]
@@ -861,7 +918,12 @@ def build_overview_items(
 ) -> list[OverviewItem]:
     """Что отдать ИИ для абзаца «Главное»: важное первым, в первом обходе — сравнения."""
     items = [
-        OverviewItem(f.page_diff.url, _finding_label(f), f.analysis, f.comparison)
+        OverviewItem(
+            f.url,
+            f"{SITEWIDE_LABEL} на {len(f.sitewide.urls)} стр." if f.sitewide else _finding_label(f),
+            f.analysis,
+            f.comparison,
+        )
         for f in _by_importance(findings)
         if not _is_minor(f.analysis)
     ]
@@ -1111,6 +1173,58 @@ async def _load_own_site_for_comparison(db: Session, competitor: Competitor) -> 
     return await asyncio.to_thread(load_own_site, db)
 
 
+def _diff_for_ai(page_diff: PageDiff, sitewide: SitewideSplit) -> PageDiff:
+    """Если на странице есть сквозной блок, ИИ получает только то, что поменялось на ней самой."""
+    own = sitewide.own_changes.get(page_diff.url)
+    return replace(page_diff, own_diff_text=own) if own is not None else page_diff
+
+
+async def _analyze_sitewide(group: SitewideGroup, new_page_urls: list[str]) -> AiAnalysisResult | None:
+    try:
+        return await analyze_sitewide_group(group, new_page_urls)
+    except (ClaudeCliError, ValueError) as exc:
+        logger.warning("ИИ-анализ сквозного изменения (%s стр.) не удался: %s", len(group.urls), exc)
+        return None
+
+
+def _sitewide_member_analysis(group: SitewideGroup, analysis: AiAnalysisResult | None) -> AiAnalysisResult | None:
+    """Разбор блока от лица одной его страницы — для ленты бота и итога по нашему сайту."""
+    if analysis is None:
+        return None
+    return replace(
+        analysis,
+        summary=f"{SITEWIDE_LABEL} на {len(group.urls)} стр.: {analysis.summary or ''}".rstrip(": "),
+        raw_response={**analysis.raw_response, "sitewide_pages": len(group.urls)},
+    )
+
+
+def _store_sitewide_member_analyses(
+    db: Session,
+    prepared: list[tuple[PageDiff, Page, PageChange, str | None]],
+    sitewide: SitewideSplit,
+    group_analyses: list[AiAnalysisResult | None],
+) -> None:
+    """Страницам, где поменялся только сквозной блок, — разбор блока.
+
+    Без него дозаправка (app/ai/backfill.py) сочла бы их неразобранными и
+    отправила бы в ИИ поштучно — ровно то, от чего склейка спасает.
+    """
+    group_by_url: dict[str, tuple[SitewideGroup, AiAnalysisResult | None]] = {}
+    for group, analysis in zip(sitewide.groups, group_analyses, strict=True):
+        for url in group.urls:
+            group_by_url.setdefault(url, (group, analysis))
+    for page_diff, _page, page_change, _moved in prepared:
+        if not sitewide.is_fully_sitewide(page_diff.url) or page_diff.url not in group_by_url:
+            continue
+        member = _sitewide_member_analysis(*group_by_url[page_diff.url])
+        if member:
+            _store_analysis(db, page_change, member)
+
+
+async def _no_analysis() -> AiAnalysisResult | None:
+    return None
+
+
 async def _no_comparison() -> ComparisonResult | None:
     """Заглушка-корутина для asyncio.gather там, где сравнение с нашим сайтом не нужно."""
     return None
@@ -1172,6 +1286,11 @@ async def _analyze_and_store(
         logger.warning("ИИ-анализ не удался для %s: %s", page_diff.url, exc)
         return None
 
+    _store_analysis(db, page_change, analysis)
+    return analysis
+
+
+def _store_analysis(db: Session, page_change: PageChange, analysis: AiAnalysisResult) -> None:
     db.add(
         AiAnalysis(
             page_change_id=page_change.id,
@@ -1184,4 +1303,3 @@ async def _analyze_and_store(
             raw_response=analysis.raw_response,
         )
     )
-    return analysis

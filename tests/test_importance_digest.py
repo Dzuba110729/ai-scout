@@ -70,7 +70,7 @@ def test_report_row_marks_important_and_explains_why():
     row = build_row(diff, _analysis("high", "Новая акция"), NOW)
 
     assert row[1] == "Новая страница\n🔥 Важно"
-    assert "Почему важно: Новая акция" in row[6]
+    assert "Почему важно: Новая акция" in row[7]
 
 
 def test_report_row_without_importance_is_unchanged():

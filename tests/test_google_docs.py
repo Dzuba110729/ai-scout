@@ -29,9 +29,9 @@ def test_build_row_new_page_with_analysis():
     assert row[1] == "Новая страница"
     assert row[2] == "https://x.ru/promo"
     assert row[3] == "лендинг"
-    assert row[4] == "Скидка 30%"
-    assert row[5] == "Записаться"
-    assert row[6] == "Новая акция"
+    assert row[5] == "Скидка 30%"
+    assert row[6] == "Записаться"
+    assert row[7] == "Новая акция"
 
 
 def test_build_row_without_analysis_uses_empty_strings():
@@ -40,7 +40,8 @@ def test_build_row_without_analysis_uses_empty_strings():
     row = build_row(page_diff, None, datetime.now(UTC))
 
     assert row[1] == "Страница удалена"
-    assert row[3] == row[4] == row[5] == row[6] == ""
+    assert row[3] == row[5] == row[6] == row[7] == ""
+    assert row[4] == "Коммерция (продукт)"
 
 
 def test_build_row_for_moved_page_shows_target_and_what_is_there_now():
@@ -56,8 +57,8 @@ def test_build_row_for_moved_page_shows_target_and_what_is_there_now():
 
     assert row[1] == "Страница переехала"
     assert row[2] == "https://x.ru/old"
-    assert "Новый адрес: https://x.ru/new" in row[6]
-    assert "Теперь там: Страница курса по физике" in row[6]
+    assert "Новый адрес: https://x.ru/new" in row[7]
+    assert "Теперь там: Страница курса по физике" in row[7]
     assert len(row) == len(_HEADER)
 
 
@@ -69,7 +70,7 @@ def test_report_has_no_redirect_column():
 
     assert row[1] == "Страница удалена"
     assert len(row) == len(_HEADER)
-    assert "Новый адрес" not in row[6]
+    assert "Новый адрес" not in row[7]
 
 
 def test_build_row_adds_comparison_with_our_site():
@@ -84,10 +85,10 @@ def test_build_row_adds_comparison_with_our_site():
 
     row = build_row(page_diff, None, datetime.now(UTC), comparison=comparison)
 
-    assert "У нас похожее есть" in row[7]
-    assert "https://og1.ru/promo" in row[7]
-    assert "Отличия: У конкурента есть цена" in row[8]
-    assert "Чего нам не хватает: Добавить отзывы учеников." in row[8]
+    assert "У нас похожее есть" in row[8]
+    assert "https://og1.ru/promo" in row[8]
+    assert "Отличия: У конкурента есть цена" in row[9]
+    assert "Чего нам не хватает: Добавить отзывы учеников." in row[9]
 
 
 def test_build_row_leaves_comparison_columns_empty_when_not_compared():
@@ -95,8 +96,8 @@ def test_build_row_leaves_comparison_columns_empty_when_not_compared():
 
     row = build_row(page_diff, None, datetime.now(UTC))
 
-    assert row[7] == ""
     assert row[8] == ""
+    assert row[9] == ""
 
 
 def test_client_not_configured_without_any_credentials(monkeypatch, tmp_path):
@@ -202,7 +203,7 @@ def test_compute_column_widths_text_columns_wider_than_short_ones():
 
     assert len(widths) == len(_HEADER)
     assert abs(sum(widths) - 648) < 1  # с учётом округления
-    date_col, category_col, summary_col = widths[0], widths[3], widths[6]
+    date_col, category_col, summary_col = widths[0], widths[3], widths[7]
     assert summary_col > date_col
     assert summary_col > category_col
 

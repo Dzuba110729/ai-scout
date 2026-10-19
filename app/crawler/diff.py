@@ -7,6 +7,7 @@
 import difflib
 import hashlib
 import re
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 
@@ -104,11 +105,98 @@ def strip_related_blocks(text: str) -> str:
     return "\n".join(result)
 
 
+# Карусель отзывов (skysmart.ru, октябрь 2026): «Отзывы о преподавателях, ведущих
+# курсы», дальше карточки «имя — дата — оценка — текст — Отзыв о преподавателе —
+# Наталье — на курс — Подготовка к ЕГЭ». При каждой загрузке в ней другие отзывы, и
+# она одна давала больше сотни «изменений» за обход. SEO-специалисту новые отзывы
+# конкурента не нужны (обратная связь 2026-10-19) — вырезаем блок из сравнения.
+_REVIEWS_HEADING_RE = re.compile(
+    r"^(?:отзывы|что говорят|что пишут|мнения)\b.{0,80}$|^\d[\d  ]*\s+отзыв\w*$", re.IGNORECASE
+)
+# Сколько строк может быть между датами соседних карточек отзывов (и от заголовка
+# до первой даты: перед ней бывают рейтинг, число оценок, имя автора).
+_REVIEW_CARD_MAX_LINES = 15
+# Счётчик отзывов и оценок: «1503» + «отзыва», «1 503 отзыва», «Отзывы (1503)».
+_REVIEW_WORD_RE = re.compile(r"^(?:отзыв(?:ов|а|ы)?|оцен(?:ок|ки|ка))$", re.IGNORECASE)
+_REVIEW_COUNT_RE = re.compile(
+    r"^\d[\d  ]*\s*(?:отзыв|оцен)\w*$|^(?:отзыв|оцен)\w*\s*\(?\s*\d[\d  ]*\s*\)?$", re.IGNORECASE
+)
+
+
+def _review_block_end(lines: list[str], dates: list[int]) -> int:
+    """Индекс последней строки ленты отзывов (в ней не меньше двух карточек с датами).
+
+    Конец последней карточки по дате не виден, а длина карточек разная: текст отзыва
+    бывает в несколько строк. Поэтому ищем «якорь» — строку, которая есть ровно один
+    раз в каждой карточке и всегда на одном расстоянии до даты следующей («на курс»
+    у skysmart). Между якорем и следующей датой — хвост карточки и шапка следующей
+    (буква-аватар и имя автора); шапку вычитаем, остаток после якоря и есть хвост.
+    """
+    spans = [(dates[k], dates[k + 1]) for k in range(len(dates) - 1)]
+    head = 2 if all(len(lines[date - 2].strip()) <= 2 for date in dates if date >= 2) else 1
+
+    anchors: dict[str, int] | None = None
+    for start, end in spans:
+        counts = Counter(line.strip() for line in lines[start + 1 : end])
+        distances = {
+            lines[pos].strip(): end - pos for pos in range(start + 1, end) if counts[lines[pos].strip()] == 1
+        }
+        anchors = distances if anchors is None else {
+            text: dist for text, dist in anchors.items() if distances.get(text) == dist
+        }
+    last = dates[-1]
+    # Якорь должен быть и в последней карточке; ближайший к её концу — точнее всего.
+    in_last = {}
+    for pos in range(last + 1, min(len(lines), last + _REVIEW_CARD_MAX_LINES)):
+        in_last.setdefault(lines[pos].strip(), pos)
+    found = [(distance, in_last[text]) for text, distance in (anchors or {}).items() if text in in_last]
+    if not found:
+        return last
+    distance, pos = min(found)
+    return min(len(lines) - 1, pos + max(0, distance - 1 - head))
+
+
+def strip_review_blocks(text: str) -> str:
+    """Убирает из текста страницы ленты отзывов с датами (карусели на страницах курсов)."""
+    lines = text.splitlines()
+    result: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not _REVIEWS_HEADING_RE.match(lines[index].strip()):
+            result.append(lines[index])
+            index += 1
+            continue
+        dates: list[int] = []
+        cursor = index + 1
+        while cursor < len(lines) and cursor - (dates[-1] if dates else index) <= _REVIEW_CARD_MAX_LINES:
+            if _CARD_DATE_RE.match(lines[cursor].strip()):
+                dates.append(cursor)
+            cursor += 1
+        if len(dates) < 2:
+            # Одна дата после «Отзывы» — скорее обычный текст (старт курса), не лента.
+            result.append(lines[index])
+            index += 1
+            continue
+        index = _review_block_end(lines, dates) + 1
+    return "\n".join(result)
+
+
+def strip_rotating_blocks(text: str) -> str:
+    """Без блоков, которые меняются от загрузки к загрузке: подборки статей и отзывы."""
+    return strip_review_blocks(strip_related_blocks(text))
+
+
 def normalize_for_compare(text: str) -> str:
     """Текст страницы без шума — для решения «страница изменилась или нет»."""
-    lines = strip_related_blocks(text).splitlines()
+    lines = strip_rotating_blocks(text).splitlines()
     result = []
     for index, line in enumerate(lines):
+        if _REVIEW_COUNT_RE.match(line):
+            result.append("# отзывы")
+            continue
+        if _REVIEW_WORD_RE.match(line) and index and _BARE_NUMBER_RE.match(lines[index - 1]):
+            result.append("отзывы")
+            continue
         if _COOKIE_LINE_RE.search(line) and len(line) <= _COOKIE_LINE_MAX:
             continue
         if line.lower() in _CONSENT_BUTTONS:
@@ -157,13 +245,16 @@ class PageDiff:
     change_type: ChangeType
     old_text: str | None = None
     new_text: str | None = None
+    # Только то, что поменялось именно на этой странице, без сквозных блоков (см.
+    # app/crawler/sitewide.py) — для ИИ. None — сквозных блоков на странице нет.
+    own_diff_text: str | None = None
 
     @property
     def diff_text(self) -> str | None:
         if self.change_type is not ChangeType.CHANGED:
             return None
-        # Без подборок статей: иначе ИИ и отчёт видят их перетасовку как «изменение».
-        return unified_diff(strip_related_blocks(self.old_text or ""), strip_related_blocks(self.new_text or ""))
+        # Без подборок статей и лент отзывов: иначе ИИ и отчёт видят их перетасовку как «изменение».
+        return unified_diff(strip_rotating_blocks(self.old_text or ""), strip_rotating_blocks(self.new_text or ""))
 
 
 def diff_crawl(

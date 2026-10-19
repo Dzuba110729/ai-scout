@@ -249,8 +249,8 @@ def test_first_crawl_compares_key_pages_with_our_site(env, monkeypatch):
     rows, _notes = state["reports"][0]
     assert [row[2] for row in rows] == ["https://sky.ru/courses/ege", "https://sky.ru/price"]  # «нет у нас» первым
     assert rows[0][1].startswith("Первый обход")
-    assert "У нас такого нет" in rows[0][7]
-    assert "нет курса ЕГЭ" in rows[0][8]
+    assert "У нас такого нет" in rows[0][8]
+    assert "нет курса ЕГЭ" in rows[0][9]
     summary = state["summaries"][0]
     assert "точка отсчёта" in summary.counts
     assert summary.missing == [("нет курса ЕГЭ", "https://sky.ru/courses/ege")]
