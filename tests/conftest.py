@@ -19,3 +19,13 @@ def _no_real_intent_cards(monkeypatch):
         return [None] * len(articles)
 
     monkeypatch.setattr("app.seo.make_intent_cards", no_cards)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_topic_match(monkeypatch):
+    """Сравнение со своими статьями тоже зовёт `claude -p` — в тестах ИИ «молчит»."""
+
+    async def no_match(cases):
+        return [None] * len(cases)
+
+    monkeypatch.setattr("app.seo.match_articles", no_match)

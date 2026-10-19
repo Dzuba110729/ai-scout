@@ -219,6 +219,64 @@ class ArticleIntent(Base):
     page: Mapped["Page"] = relationship(back_populates="intent")
 
 
+class TopicDecision(Base):
+    """Тема инфостатьи конкурентов и решение редакции по ней (app/ai/topic_match.py).
+
+    Одна тема у нескольких конкурентов — одна запись: статьи привязаны к ней через
+    SeoFinding. Решение: new — написать новую статью, update — обновить our_url
+    (add_subintents), covered — у нас раскрыто. cannibal_urls — наши статьи на один
+    интент (риск каннибализации).
+    """
+
+    __tablename__ = "topic_decisions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    topic: Mapped[str] = mapped_column(Text)
+    main_intent: Mapped[str] = mapped_column(Text)
+    material_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Подинтенты статей конкурентов по теме (объединённые).
+    subintents: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    decision: Mapped[str] = mapped_column(Text)
+    coverage: Mapped[str | None] = mapped_column(Text, nullable=True)
+    our_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    add_subintents: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    argument: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cannibal_urls: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    raw_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    findings: Mapped[list["SeoFinding"]] = relationship(
+        back_populates="decision", cascade="all, delete-orphan", order_by="SeoFinding.detected_at"
+    )
+
+
+class SeoFinding(Base):
+    """Статья конкурента, привязанная к теме: новая, изменилась или найдена аудитом.
+
+    По этим строкам строится Google Таблица: строка таблицы = тема за период.
+    """
+
+    __tablename__ = "seo_findings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    decision_id: Mapped[int] = mapped_column(ForeignKey("topic_decisions.id", ondelete="CASCADE"))
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True)
+    competitor_id: Mapped[int] = mapped_column(ForeignKey("competitors.id", ondelete="CASCADE"))
+    page_change_id: Mapped[int | None] = mapped_column(
+        ForeignKey("page_changes.id", ondelete="SET NULL"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(Text)  # new / changed / audit
+    added_subintents: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    decision: Mapped["TopicDecision"] = relationship(back_populates="findings")
+    page: Mapped["Page"] = relationship()
+    competitor: Mapped["Competitor"] = relationship()
+
+
 class PageSnapshot(Base):
     __tablename__ = "page_snapshots"
 

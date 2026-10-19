@@ -28,6 +28,7 @@ from app.models import (
     Page,
     PageChange,
     PageStructureRecord,
+    SeoFinding,
     SessionStatus,
 )
 
@@ -244,3 +245,42 @@ def test_crawl_gives_cards_to_new_and_changed_articles_only(env, monkeypatch):
     assert calls == [[new_article]]  # коммерческая страница карточку не получает
     assert db.query(ArticleIntent).one().page.url == new_article
     assert any("SEO: разобрано инфостатей" in note for note in state["reports"][-1][1])
+
+
+def test_crawl_compares_new_competitor_article_with_our_articles(env, monkeypatch):
+    db, state = env
+    own = Competitor(name="Наш сайт", base_url="https://og1.ru", is_own=True, status=SessionStatus.ACTIVE)
+    db.add(own)
+    db.flush()
+    our_page = Page(competitor_id=own.id, url="https://og1.ru/polza/okonchanie")
+    db.add(our_page)
+    db.flush()
+    db.add(PageStructureRecord(page_id=our_page.id, h1="Окончание слова", headings=[], main_text="окончание слова"))
+    rival = _rival(db, None)
+    state["pages"] = {f"{SITE}/courses/ege": "ЕГЭ"}
+    _run(db, rival)
+
+    async def fake_cards(articles):
+        return [IntentCard(topic="Окончание слова", main_intent="узнать про окончание") for _ in articles]
+
+    asked: list = []
+
+    async def fake_match(cases):
+        asked.extend(article.url for article, _candidates in cases)
+        return [
+            seo.MatchResult("update", candidates[0].url, "partial", ["нулевое окончание"], "нет раздела", [], {})
+            for _article, candidates in cases
+        ]
+
+    monkeypatch.setattr(seo, "make_intent_cards", fake_cards)
+    monkeypatch.setattr(seo, "match_articles", fake_match)
+    article = f"{SITE}/articles/okonchanie"
+    state["pages"][article] = "статья про окончание"
+    state["structures"] = {article: PageStructure(h1="Окончание", main_text="окончание слова")}
+    _run(db, rival)
+
+    assert asked == [article]
+    finding = db.query(SeoFinding).one()
+    assert (finding.kind, finding.decision.our_url) == ("new", "https://og1.ru/polza/okonchanie")
+    assert finding.page_change_id is not None
+    assert any("Решения: обновить нашу — 1" in note for note in state["reports"][-1][1])

@@ -752,6 +752,9 @@ async def run_crawl_for_competitor(
             db,
             [] if is_baseline else _info_articles_for_seo(diffs, previous_by_url, crawl_result.structures),
             is_own=competitor.is_own,
+            competitor_id=competitor.id,
+            kinds={d.url: "new" if d.change_type is ChangeType.NEW else "changed" for d in diffs},
+            change_ids={page_diff.url: change.id for page_diff, _page, change, _moved in prepared},
         )
 
         notes = build_run_notes(crawl_result, checks)
