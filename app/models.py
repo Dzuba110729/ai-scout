@@ -106,6 +106,12 @@ class Competitor(Base):
     # сам, когда владелец присылает боту выгрузку кук (app/telegram_bot.py).
     cookies_only: Mapped[bool] = mapped_column(default=False, server_default=false())
 
+    # Фильтр разделов (include_paths), с которым прошёл последний удачный обход. Если
+    # владелец открыл новый раздел (убрал «!/articles», добавил вики), страницы этого
+    # раздела в следующем обходе — точка отсчёта, а не тысяча «новых страниц».
+    # null — ещё не записан (сайт не обходили с этим полем): сравнивать не с чем.
+    tracked_include_paths: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Документ последнего обхода в Google Docs — чтобы бот мог прислать его в любой
     # момент, а не только в сообщении об окончании обхода.
     last_report_url: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -154,6 +160,34 @@ class Page(Base):
         back_populates="page", cascade="all, delete-orphan", order_by="PageSnapshot.fetched_at"
     )
     changes: Mapped[list["PageChange"]] = relationship(back_populates="page", cascade="all, delete-orphan")
+    structure: Mapped["PageStructureRecord | None"] = relationship(
+        back_populates="page", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class PageStructureRecord(Base):
+    """Структура страницы с последней загрузки: мета-теги, H1, оглавление, текст статьи.
+
+    Для SEO-разбора статей конкурентов (app/crawler/structure.py). Одна строка на
+    страницу, перезаписывается при каждой реальной загрузке; страницы, перенесённые из
+    прошлого снимка без загрузки, сохраняют прежнюю. Сравнение и поиск изменений идут
+    по-прежнему по PageSnapshot.text_content — эта таблица на них не влияет.
+    """
+
+    __tablename__ = "page_structures"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    page_id: Mapped[int] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), unique=True)
+    meta_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    meta_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    h1: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Оглавление по порядку: [[2, "Заголовок H2"], [3, "Подзаголовок H3"], …]
+    headings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    main_text: Mapped[str] = mapped_column(Text, default="")
+    main_text_length: Mapped[int] = mapped_column(default=0)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    page: Mapped["Page"] = relationship(back_populates="structure")
 
 
 class PageSnapshot(Base):

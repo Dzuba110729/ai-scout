@@ -30,7 +30,7 @@ def env(monkeypatch):
 
     state = {"pages": {}, "ai_calls": 0, "sent": [], "reports": []}
 
-    async def fake_crawl(_db, competitor, _previous, _force_full):
+    async def fake_crawl(_db, competitor, _previous, _force_full, **_kwargs):
         return CrawlResult(base_url=competitor.base_url, pages=dict(state["pages"]), urls_total=len(state["pages"]))
 
     async def fake_analyze(page_diff):

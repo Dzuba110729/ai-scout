@@ -21,6 +21,7 @@ from patchright.async_api import BrowserContext, Page, Response
 from app.config import settings
 from app.crawler.blocking import blocked_reason, is_blocked
 from app.crawler.diff import extract_text
+from app.crawler.structure import PageStructure, extract_structure
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,10 @@ class CrawlResult:
     base_url: str
     pages: dict[str, str] = field(default_factory=dict)  # url -> нормализованный текст
     page_titles: dict[str, str] = field(default_factory=dict)
+    # Структура (мета-теги, H1, оглавление, текст статьи) — только у страниц, реально
+    # загруженных в этом обходе: у перенесённых из прошлого снимка и взятых из черновика
+    # (PageFetchCache) её нет, в базе остаётся прежняя.
+    structures: dict[str, PageStructure] = field(default_factory=dict)
     urls_total: int = 0  # сколько страниц нашли всего, ДО обрезки по лимиту
     # Дата обновления страницы по карте сайта на момент ЭТОГО обхода — только для
     # адресов, которые реально попали в pages (свежепойманные и перенесённые как есть).
@@ -353,6 +358,7 @@ def plan_crawl(
     force_full: bool,
     max_fetch: int,
     max_undated: int | None = None,
+    refetch: set[str] | None = None,
 ) -> CrawlPlan:
     """Решает, какие страницы грузить с сайта заново, а какие можно не трогать.
 
@@ -370,6 +376,10 @@ def plan_crawl(
     каждую неделю брал одни и те же первые страницы по алфавиту, а остальные — курсы,
     цены — не проверялись вовсе. None — страницы без даты делят общий max_fetch.
 
+    refetch — страницы, которые надо загрузить заново, хотя дата в карте сайта не
+    менялась: статьи, у которых ещё нет сохранённой структуры (H1, мета-теги — см.
+    app/crawler/structure.py). Идут в одну очередь со страницами без даты.
+
     Страница, пропавшая из карты сайта, сюда вообще не попадает ни в to_fetch,
     ни в carry_over — этого достаточно, чтобы diff_crawl отдельно классифицировал
     её как removed (см. app.crawler.diff).
@@ -382,6 +392,7 @@ def plan_crawl(
     # новая страница могла неделями не попадать в лимит.
     candidates: list[tuple[int, str]] = []
     carry_over: dict[str, str] = {}
+    refetch = refetch or set()
 
     for entry in entries:
         previous = previous_pages.get(entry.url)
@@ -389,7 +400,7 @@ def plan_crawl(
             candidates.append((0, entry.url))
         elif entry.lastmod is not None and previous.lastmod is not None and entry.lastmod > previous.lastmod:
             candidates.append((1, entry.url))
-        elif entry.lastmod is None or previous.lastmod is None:
+        elif entry.lastmod is None or previous.lastmod is None or entry.url in refetch:
             candidates.append((2, entry.url))
         else:
             carry_over[entry.url] = previous.text
@@ -507,8 +518,12 @@ async def discover_urls_by_crawling(
     return discovered
 
 
-async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str]:
-    """Открывает страницу и возвращает (заголовок, нормализованный текст). Бросает CompetitorBlockedError."""
+async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str, PageStructure]:
+    """Открывает страницу и возвращает (заголовок, нормализованный текст, структура).
+    Бросает CompetitorBlockedError.
+
+    Текст — для сравнения обходов (extract_text, не менять: иначе все страницы станут
+    «изменившимися»), структура — для SEO-разбора статей (extract_structure)."""
     page = await context.new_page()
     try:
         loaded = await _goto_through_challenge(page, url)
@@ -525,7 +540,12 @@ async def fetch_page_text(context: BrowserContext, url: str) -> tuple[str, str]:
             raise CompetitorBlockedError(url, blocked_reason(status, html) or "неизвестно")
 
         title = await page.title()
-        return title, extract_text(html)
+        try:
+            structure = extract_structure(html)
+        except Exception:  # структура — довесок, без неё страница всё равно нужна
+            logger.warning("Не удалось разобрать структуру страницы %s", url, exc_info=True)
+            structure = PageStructure(meta_title=title or None)
+        return title, extract_text(html), structure
     finally:
         await page.close()
 
@@ -536,9 +556,10 @@ async def _fetch_all(
     *,
     cache_lookup: CacheLookup | None,
     cache_store: CacheStore | None,
-) -> dict[str, tuple[str, str] | None]:
-    """Грузит страницы в crawl_page_concurrency вкладок разом. url -> (title, text),
-    None — страницу не удалось загрузить (таймаут, обрыв сети).
+) -> dict[str, tuple[str, str, PageStructure | None] | None]:
+    """Грузит страницы в crawl_page_concurrency вкладок разом. url -> (title, text,
+    структура), None — страницу не удалось загрузить (таймаут, обрыв сети). У страниц
+    из черновика (cache_lookup) структуры нет — None.
 
     Раньше страницы шли строго по одной, и первый обход сайта на тысячи страниц
     занимал сутки. Каждая вкладка после своей загрузки выдерживает паузу
@@ -547,7 +568,7 @@ async def _fetch_all(
     CompetitorBlockedError в любой вкладке останавливает все остальные и уходит
     наверх — это сигнал прекратить весь обход, а не сбой одной страницы.
     """
-    results: dict[str, tuple[str, str] | None] = {}
+    results: dict[str, tuple[str, str, PageStructure | None] | None] = {}
     queue: asyncio.Queue[str] = asyncio.Queue()
     for url in urls:
         queue.put_nowait(url)
@@ -562,10 +583,10 @@ async def _fetch_all(
             async with cache_lock:
                 cached = await cache_lookup(url)
             if cached is not None:
-                results[url] = cached
+                results[url] = (*cached, None)
                 return
         try:
-            title, text = await fetch_page_text(context, url)
+            title, text, *rest = await fetch_page_text(context, url)
         except CompetitorBlockedError:
             raise
         except Exception:
@@ -575,7 +596,7 @@ async def _fetch_all(
             logger.warning("Не удалось загрузить страницу %s — пропускаем в этом обходе", url, exc_info=True)
             results[url] = None
             return
-        results[url] = (title, text)
+        results[url] = (title, text, rest[0] if rest else None)
         if cache_store:
             async with cache_lock:
                 await cache_store(url, title, text)
@@ -709,6 +730,7 @@ async def crawl_competitor(
     on_urls_discovered: OnUrlsDiscovered | None = None,
     sitemap_url: str | None = None,
     include_paths: list[str] | None = None,
+    refetch_urls: set[str] | None = None,
 ) -> CrawlResult:
     """Обход одного конкурента: находим URL и рендерим только те страницы, которые
     реально нужно (см. plan_crawl) — остальные переносим из прошлого снимка.
@@ -736,6 +758,7 @@ async def crawl_competitor(
             force_full=force_full,
             max_fetch=max_pages,
             max_undated=max_undated_pages,
+            refetch=refetch_urls,
         )
         to_fetch = plan.to_fetch
         carry_over = plan.carry_over
@@ -756,6 +779,7 @@ async def crawl_competitor(
             force_full=force_full,
             max_fetch=max_pages,
             max_undated=max_undated_pages,
+            refetch=refetch_urls,
         )
         to_fetch = plan.to_fetch
         carry_over = plan.carry_over
@@ -794,9 +818,11 @@ async def crawl_competitor(
             if previous is not None:
                 result.pages[url] = previous.text  # считаем неизменной, перепроверим в следующий раз
             continue
-        title, text = page
+        title, text, structure = page
         result.pages[url] = text
         result.page_titles[url] = title
+        if structure is not None:
+            result.structures[url] = structure
 
     # Дату у страниц, которые не удалось загрузить, не обновляем — с их прежней
     # (более старой) датой они снова станут кандидатами на загрузку в следующий раз.

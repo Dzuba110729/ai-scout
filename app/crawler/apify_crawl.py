@@ -14,6 +14,7 @@ from apify_client import ApifyClientAsync
 
 from app.config import settings
 from app.crawler.crawl import CrawlResult
+from app.crawler.structure import structure_from_apify_item
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,8 @@ async def crawl_competitor_via_apify(base_url: str, *, max_pages: int = 200) -> 
             continue
         result.pages[url] = _normalize_text(text)
         result.page_titles[url] = _extract_title(item)
+        # HTML актор не отдаёт: мета-теги — из metadata, H1 и оглавление — из markdown.
+        result.structures[url] = structure_from_apify_item(item)
 
     # Apify не сообщает, сколько страниц на сайте всего — знаем только то, что принесли.
     result.urls_total = len(result.pages)

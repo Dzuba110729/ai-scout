@@ -7,6 +7,11 @@
 Правило простое, без ИИ: сначала раздел в адресе (/blog/, /articles/, /polza/ …),
 потом категория из ИИ-разбора (статья/новость/чек-лист/тест). Всё остальное —
 коммерция.
+
+То же правило по адресу (is_info_url) решает, какие страницы — статьи, у которых
+нужна структура (H1, мета-теги, оглавление — app/crawler/structure.py), у конкурентов
+и у нашего сайта. Отдельного поля у конкурента нет: разделы статей у всех сайтов
+названы одинаково (/articles, /blog, /wiki, /polza…), а новый раздел — одно слово здесь.
 """
 
 import re
@@ -29,8 +34,13 @@ _INFO_PATH_RE = re.compile(
 _INFO_CATEGORY_RE = re.compile(r"стать|новост|чек-?лист|тест|совет|блог|вопрос", re.IGNORECASE)
 
 
+def is_info_url(url: str) -> bool:
+    """Страница из раздела статей/новостей/вопросов — инфоконтент для SEO."""
+    return bool(_INFO_PATH_RE.search(urlparse(url).path))
+
+
 def content_kind(url: str, category: str | None) -> str:
-    if _INFO_PATH_RE.search(urlparse(url).path):
+    if is_info_url(url):
         return INFO
     if category and _INFO_CATEGORY_RE.search(category):
         return INFO

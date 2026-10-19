@@ -31,7 +31,7 @@ from app.ai.backfill import backfill_missing_analyses
 from app.ai.compare import VERDICT_NONE, ComparisonResult, OwnSite, compare_with_own_site
 from app.ai.run_overview import OverviewItem, write_run_overview
 from app.config import STORAGE_STATE_DIR, settings
-from app.content_kind import INFO, content_kind
+from app.content_kind import INFO, content_kind, is_info_url
 from app.crawler.apify_crawl import ApifyCrawlError, crawl_competitor_via_apify
 from app.crawler.browser import (
     launch_browser,
@@ -53,6 +53,7 @@ from app.crawler.crawl import (
 from app.crawler.diff import ChangeType, PageDiff, content_hash, diff_crawl
 from app.crawler.recheck import DisappearReason, MissingPageCheck, check_missing_pages
 from app.crawler.sitewide import SitewideGroup, SitewideSplit, find_sitewide_changes
+from app.crawler.structure import PageStructure
 from app.integrations.google_docs import (
     SITEWIDE_LABEL,
     GoogleDocsClient,
@@ -73,6 +74,7 @@ from app.models import (
     PageChange,
     PageFetchCache,
     PageSnapshot,
+    PageStructureRecord,
     SessionStatus,
 )
 from app.models import (
@@ -278,6 +280,126 @@ def _clear_fetch_cache(db: Session, competitor_id: int) -> None:
     db.query(Competitor).filter(Competitor.id == competitor_id).update({"crawl_pages_total": None})
 
 
+def _previous_include_paths(competitor: Competitor) -> list[str] | None:
+    """Фильтр разделов прошлого удачного обхода — если с тех пор владелец его поменял.
+
+    None — фильтр тот же (или прошлый неизвестен): новых разделов нет, и все новые
+    адреса — настоящие новые страницы конкурента. Так и отличаем «раздел только что
+    включили» от «конкурент опубликовал много страниц»: точкой отсчёта считаются только
+    адреса, которые прошлый фильтр не пропускал. Статья, опубликованная конкурентом
+    в уже отслеживаемом разделе, остаётся новой, сколько бы их ни вышло разом.
+    """
+    if competitor.tracked_include_paths is None:
+        return None
+    old = competitor_include_paths(competitor.tracked_include_paths, is_own=competitor.is_own)
+    current = competitor_include_paths(competitor.include_paths, is_own=competitor.is_own)
+    return None if old == current else old
+
+
+def _info_pages_without_structure(
+    db: Session, competitor_id: int, previous_by_url: dict[str, tuple[Page, str]]
+) -> set[str]:
+    """Статьи, у которых ещё нет сохранённой структуры (H1, мета-теги, оглавление).
+
+    Их надо один раз загрузить заново, даже если дата в карте сайта не менялась: иначе
+    у сайта с честными датами структура статей собиралась бы до месяца — до полной
+    сверки. Только статьи (is_info_url): коммерческие страницы ради этого не грузим.
+    """
+    with_structure = {
+        page_id
+        for (page_id,) in db.query(PageStructureRecord.page_id)
+        .join(Page, Page.id == PageStructureRecord.page_id)
+        .filter(Page.competitor_id == competitor_id)
+    }
+    return {
+        url for url, (page, _text) in previous_by_url.items() if is_info_url(url) and page.id not in with_structure
+    }
+
+
+def _save_structures(
+    db: Session,
+    competitor_id: int,
+    structures: dict[str, PageStructure],
+    pages_by_url: dict[str, tuple[Page, str]],
+) -> None:
+    """Структура загруженных страниц — поверх прежней (одна строка на страницу)."""
+    if not structures:
+        return
+    existing = {
+        record.page_id: record
+        for record in db.query(PageStructureRecord)
+        .join(Page, Page.id == PageStructureRecord.page_id)
+        .filter(Page.competitor_id == competitor_id)
+    }
+    now = datetime.now(UTC)
+    for url, structure in structures.items():
+        item = pages_by_url.get(url)
+        if item is None or item[0].id is None:
+            continue
+        record = existing.get(item[0].id)
+        if record is None:
+            record = PageStructureRecord(page_id=item[0].id)
+            db.add(record)
+        record.meta_title = structure.meta_title
+        record.meta_description = structure.meta_description
+        record.h1 = structure.h1
+        record.headings = [[level, text] for level, text in structure.headings]
+        record.main_text = structure.main_text
+        record.main_text_length = len(structure.main_text)
+        record.fetched_at = now
+
+
+def _retire_stale_section_pages(
+    db: Session,
+    competitor_id: int,
+    include_paths: list[str],
+    old_paths: list[str],
+    crawl_result: CrawlResult,
+    now: datetime,
+) -> None:
+    """Страницы открытого заново раздела, которые остались в базе с давних обходов
+    (раздел обходили до того, как исключили), а на сайте их уже нет.
+
+    Тихо снимаем их с учёта: иначе следующий обход счёл бы их «удалёнными» — это не
+    новость, они пропали когда-то, пока мы за разделом не следили. Причина пропажи не
+    проверялась, поэтому disappearance_reason не ставим.
+    """
+    seen = set(crawl_result.pages) | set(crawl_result.failed_urls)
+    pages = db.query(Page).filter(Page.competitor_id == competitor_id, Page.is_removed.is_(False)).all()
+    for page in pages:
+        if page.url in seen or not path_included(page.url, include_paths) or path_included(page.url, old_paths):
+            continue
+        page.is_removed = True
+        page.removed_at = now
+
+
+def _section_of(url: str) -> str:
+    parts = [part for part in urlparse(url).path.split("/") if part]
+    return "/" + parts[0] if parts else "/"
+
+
+def format_new_sections_note(urls: list[str]) -> str:
+    """Одна строка в итоге обхода вместо тысячи «новых страниц» из только что открытого раздела."""
+    counts: dict[str, int] = {}
+    for url in urls:
+        section = _section_of(url)
+        counts[section] = counts.get(section, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    if len(ordered) == 1:
+        section, count = ordered[0]
+        head = f"Начали следить за разделом {section}: {count} стр."
+    else:
+        shown = ordered[:5]
+        listing = ", ".join(f"{section} — {count} стр." for section, count in shown)
+        if len(ordered) > len(shown):
+            listing += f" и ещё разделов: {len(ordered) - len(shown)}"
+        head = f"Начали следить за разделами: {listing}."
+    return (
+        f"{head} Это точка отсчёта — новыми эти страницы не считаем, "
+        "их изменения и новые страницы покажем со следующего обхода."
+    )
+
+
 def _needs_full_crawl(competitor: Competitor) -> bool:
     """Первый обход конкурента (нет даты последнего полного обхода) или пора сделать
     очередную периодическую полную сверку — на случай сайтов, которые не обновляют
@@ -296,6 +418,9 @@ async def _crawl_competitor(
     competitor: Competitor,
     previous_pages: dict[str, PreviousPageInfo],
     force_full: bool,
+    *,
+    refetch_urls: set[str] | None = None,
+    sections_added: bool = False,
 ) -> CrawlResult:
     """Сначала локальный Playwright (с сохранённой сессией, если она есть, иначе с чистым
     контекстом — этого достаточно для слабо защищённых сайтов), и только если он упёрся
@@ -305,10 +430,16 @@ async def _crawl_competitor(
     Playwright — у Apify весь сайт приходит одним ответом, догружать по одной странице
     там нечего. У Apify также нет инкрементального обхода: актор всегда обходит сайт
     заново целиком — известное ограничение, обход через него просто не даёт экономии.
+
+    sections_added — владелец открыл новый раздел: его страниц может быть больше
+    обычного лимита (тысяча статей), а все они должны попасть в точку отсчёта сразу —
+    иначе не попавшие в этот обход в следующем выглядели бы «новыми».
     """
     storage_state_path = storage_state_path_for(competitor.id, STORAGE_STATE_DIR)
     has_session = storage_state_path.exists()
-    max_pages = settings.crawl_full_crawl_max_pages if force_full else settings.crawl_max_pages
+    max_pages = (
+        settings.crawl_full_crawl_max_pages if force_full or sections_added else settings.crawl_max_pages
+    )
 
     try:
         async with (
@@ -334,6 +465,7 @@ async def _crawl_competitor(
                 on_urls_discovered=_on_urls_discovered(db, competitor.id),
                 sitemap_url=competitor.sitemap_url,
                 include_paths=competitor_include_paths(competitor.include_paths, is_own=competitor.is_own),
+                refetch_urls=refetch_urls,
             )
             if has_session:
                 # Защита могла выдать за время обхода свежие куки — сохраняем их,
@@ -397,17 +529,36 @@ async def run_crawl_for_competitor(
         previous_by_url = {
             url: item for url, item in previous_by_url.items() if path_included(url, include_paths)
         }
+        # Раздел, который только что начали отслеживать: его страницы — точка отсчёта.
+        # Старый текст из него (раздел могли обходить раньше, до исключения) тоже не
+        # сравниваем — за месяцы он устарел, и все страницы вышли бы «изменёнными».
+        old_paths = _previous_include_paths(competitor)
+        if old_paths is not None:
+            previous_by_url = {
+                url: item for url, item in previous_by_url.items() if path_included(url, old_paths)
+            }
         previous_texts = {url: text for url, (_page, text) in previous_by_url.items()}
         previous_pages = {
             url: PreviousPageInfo(text=text, lastmod=page.sitemap_lastmod)
             for url, (page, text) in previous_by_url.items()
         }
         force_full = _needs_full_crawl(competitor)
+        refetch_urls = await asyncio.to_thread(_info_pages_without_structure, db, competitor.id, previous_by_url)
 
-        crawl_result = await _crawl_competitor(db, competitor, previous_pages, force_full)
+        crawl_result = await _crawl_competitor(
+            db,
+            competitor,
+            previous_pages,
+            force_full,
+            refetch_urls=refetch_urls,
+            sections_added=old_paths is not None,
+        )
         # Apify-фолбэк фильтр разделов не знает — отсекаем лишнее здесь, для любого пути.
         crawl_result.pages = {
             url: text for url, text in crawl_result.pages.items() if path_included(url, include_paths)
+        }
+        crawl_result.structures = {
+            url: structure for url, structure in crawl_result.structures.items() if url in crawl_result.pages
         }
         # Неизменившиеся страницы переносятся в pages из прошлого снимка, поэтому пустой
         # результат при непустом прошлом — не «ничего не поменялось», а сайт не открылся
@@ -417,6 +568,13 @@ async def run_crawl_for_competitor(
 
         diffs = diff_crawl(previous_texts, crawl_result.pages)
         run_at = datetime.now(UTC)
+        section_diffs: list[PageDiff] = []
+        if old_paths is not None and previous_by_url:
+            section_diffs = [
+                d for d in diffs if d.change_type is ChangeType.NEW and not path_included(d.url, old_paths)
+            ]
+            section_urls = {d.url for d in section_diffs}
+            diffs = [d for d in diffs if d.url not in section_urls]
 
         checks = await _recheck_missing_pages(diffs, previous_by_url)
         diffs = [d for d in diffs if _is_real_change(d, checks)]
@@ -427,6 +585,13 @@ async def run_crawl_for_competitor(
                 _mark_page_alive(previous_by_url[url][0], now)
         for url, check in checks.items():
             _apply_missing_check(previous_by_url[url][0], check, now)
+        for page_diff in section_diffs:
+            page = _apply_page_diff(db, competitor, page_diff, previous_by_url, crawl_result.sitemap_lastmod)
+            _save_baseline_snapshot(db, page, page_diff)
+        if old_paths is not None and previous_by_url:
+            await asyncio.to_thread(
+                _retire_stale_section_pages, db, competitor.id, include_paths, old_paths, crawl_result, now
+            )
 
         # Один и тот же блок (баннер, акция) поменялся на десятках страниц — это одна
         # находка «сквозное изменение», а не десятки строк отчёта и вызовов ИИ.
@@ -563,6 +728,8 @@ async def run_crawl_for_competitor(
             db.add(competitor)
 
         notes = build_run_notes(crawl_result, checks)
+        if section_diffs:
+            notes.append(format_new_sections_note([d.url for d in section_diffs]))
 
         # Находки этого и прошлых прогонов, оставшиеся без ИИ-разбора (CLI не ответил).
         # Инкрементальный обход сам их не пересмотрит — страницы-то не менялись.
@@ -602,9 +769,13 @@ async def run_crawl_for_competitor(
                 competitor.last_report_url = report_url
                 competitor.last_report_at = run_at
 
+        db.flush()
+        await asyncio.to_thread(_save_structures, db, competitor.id, crawl_result.structures, previous_by_url)
+
         competitor.last_crawl_finished_at = now
         if force_full:
             competitor.last_full_crawl_at = now
+        competitor.tracked_include_paths = competitor.include_paths or ""
         db.add(competitor)
         _clear_fetch_cache(db, competitor.id)
         await asyncio.to_thread(db.commit)
@@ -618,17 +789,20 @@ async def run_crawl_for_competitor(
                 else (finding.page_diff, finding.analysis)
                 for finding in findings
             ]
-            if quiet and not own_items and not is_baseline:
+            if quiet and not own_items and not is_baseline and not section_diffs:
                 db.commit()
                 logger.info("Обход нашего сайта завершён: изменений нет")
                 return True
+            own_message = format_own_site_finished(
+                competitor.base_url, own_items, baseline_pages=len(diffs) if is_baseline else None
+            )
+            if section_diffs:
+                own_message += "\n\n" + format_new_sections_note([d.url for d in section_diffs])
             await _notify(
                 notifier,
                 db,
                 competitor,
-                format_own_site_finished(
-                    competitor.base_url, own_items, baseline_pages=len(diffs) if is_baseline else None
-                ),
+                own_message,
                 page_change_id=None,
                 buttons=own_site_buttons(competitor.id) if own_items else None,
             )
