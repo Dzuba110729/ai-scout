@@ -173,7 +173,7 @@ def test_same_topic_at_two_competitors_is_one_decision_and_one_ai_call(db, monke
     assert sorted(f.competitor_id for f in decision.findings) == [sky.id, fox.id]
 
 
-def test_same_topic_twice_in_one_run_asks_ai_once_and_unrelated_topic_without_candidates_is_new(db, monkeypatch):
+def test_two_articles_of_one_site_are_two_topics_and_unrelated_topic_without_candidates_is_new(db, monkeypatch):
     own = _site(db, "og1.ru", is_own=True)
     _page(db, own, "/polza/okonchanie", PageStructure(h1="Окончание слова", main_text="Окончание — часть слова"))
     sky = _site(db, "skysmart.ru")
@@ -191,11 +191,26 @@ def test_same_topic_twice_in_one_run_asks_ai_once_and_unrelated_topic_without_ca
         ],
     )
 
-    assert calls == [["https://skysmart.ru/articles/a"]]
-    assert result.decisions == {"update": 1, "new": 1} and result.merged == 1
-    decisions = {d.topic: d for d in db.query(TopicDecision).all()}
-    assert decisions["Погода летом"].decision == "new"  # похожих у нас нет — ИИ не нужен
-    assert len(decisions[OKONCHANIE.topic].findings) == 2
+    # Две статьи одного сайта на одну тему — не склейка (это две темы у конкурента).
+    assert calls == [["https://skysmart.ru/articles/a", "https://skysmart.ru/articles/b"]]
+    assert result.decisions == {"update": 2, "new": 1} and result.merged == 0
+    decisions = db.query(TopicDecision).all()
+    assert [d.decision for d in decisions if d.topic == "Погода летом"] == ["new"]  # похожих у нас нет — без ИИ
+    assert sum(1 for d in decisions if d.topic == OKONCHANIE.topic) == 2
+
+
+def test_known_topic_of_the_same_site_is_not_merged_again(db, monkeypatch):
+    own = _site(db, "og1.ru", is_own=True)
+    _page(db, own, "/polza/okonchanie", PageStructure(h1="Окончание слова", main_text="Окончание — часть слова"))
+    sky = _site(db, "skysmart.ru")
+    calls: list = []
+    monkeypatch.setattr(seo, "match_articles", _fake_match(calls))
+
+    _process(db, sky, [_update(_page(db, sky, "/articles/a"), OKONCHANIE)])
+    second = _process(db, sky, [_update(_page(db, sky, "/articles/a-copy"), OKONCHANIE)])
+
+    assert len(calls) == 2 and second.merged == 0
+    assert db.query(TopicDecision).count() == 2
 
 
 def test_changed_article_is_compared_again_only_with_new_subintents(db, monkeypatch):

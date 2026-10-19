@@ -274,6 +274,12 @@ async def match_cards(
 
     known = db.query(TopicDecision).all()
     known_index = TextIndex([_decision_document(d) for d in known]) if known else None
+    # Какие конкуренты уже есть в каждой теме: две статьи ОДНОГО сайта — всегда две
+    # темы (пилот 19.10: «калькулятор степеней» и «степени сравнения прилагательных»
+    # у skysmart склеивались по общему слову «степень»).
+    sites_by_decision: dict[int, set[int]] = {}
+    for decision_id, competitor_id in db.query(SeoFinding.decision_id, SeoFinding.competitor_id):
+        sites_by_decision.setdefault(decision_id, set()).add(competitor_id)
     run_index = TextIndex([_card_document(case.update.card) for case in cases])
 
     to_ask: list[_Case] = []
@@ -283,14 +289,22 @@ async def match_cards(
             to_ask.append(case)
             continue
         if known_index:
-            best = known_index.search(*_card_document(card), limit=1)
-            if best and best[0][1] >= threshold:
-                case.decision = known[best[0][0]]  # та же тема уже разобрана — без ИИ
+            similar = [
+                known[number_known]
+                for number_known, score in known_index.search(*_card_document(card), limit=5)
+                if score >= threshold
+                and case.competitor_id not in sites_by_decision.get(known[number_known].id, set())
+            ]
+            if similar:
+                case.decision = similar[0]  # та же тема уже разобрана у другого конкурента — без ИИ
                 continue
         earlier = [
             other
             for other, score in run_index.search(*_card_document(card), limit=len(cases))
-            if other < number and score >= threshold and cases[other].same_as is None
+            if other < number
+            and score >= threshold
+            and cases[other].same_as is None
+            and cases[other].competitor_id != case.competitor_id
         ]
         if earlier:
             case.same_as = earlier[0]  # та же тема, что у статьи выше в этом прогоне
