@@ -188,13 +188,17 @@ def format_important_summary(items: list[tuple[str, AiAnalysisResult]], limit: i
     return "\n".join(lines)
 
 
-def report_buttons(competitor_id: int, report_url: str | None, folder_url: str | None) -> list[list[dict]]:
+def report_buttons(
+    competitor_id: int, report_url: str | None, folder_url: str | None, seo_sheet_url: str | None = None
+) -> list[list[dict]]:
     """Кнопки под сообщением об окончании обхода: сам документ, папка со всеми
     отчётами и лента находок в боте. callback_data обрабатывает app/telegram_bot.py —
     уведомление уходит от того же бота, поэтому нажатие приходит туда же."""
     rows: list[list[dict]] = []
     if report_url:
         rows.append([{"text": "📄 Открыть отчёт", "url": report_url}])
+    if seo_sheet_url:
+        rows.append([{"text": "📊 SEO-таблица: инфостатьи", "url": seo_sheet_url}])
     if folder_url:
         rows.append([{"text": "📁 Все отчёты", "url": folder_url}])
     rows.append([{"text": "🆕 Находки этого конкурента", "callback_data": f"chg:c{competitor_id}:all:1:n"}])

@@ -62,6 +62,7 @@ from app.integrations.google_docs import (
     build_row,
     build_sitewide_row,
 )
+from app.integrations.seo_sheet import export_week
 from app.models import (
     AiAnalysis,
     ComparisonVerdict,
@@ -372,6 +373,15 @@ def _retire_stale_section_pages(
             continue
         page.is_removed = True
         page.removed_at = now
+
+
+async def _export_seo_sheet(db: Session, run_at: datetime) -> str | None:
+    """Лист недели в общей SEO-таблице. Не вышло — обход всё равно завершается."""
+    try:
+        return await asyncio.to_thread(export_week, db, run_at)
+    except Exception:  # выгрузка — довесок к обходу, как и отчёт в Google Docs
+        logger.exception("Не удалось выгрузить SEO-таблицу")
+        return None
 
 
 def _info_articles_for_seo(
@@ -757,6 +767,10 @@ async def run_crawl_for_competitor(
             change_ids={page_diff.url: change.id for page_diff, _page, change, _moved in prepared},
         )
 
+        seo_sheet_url = None
+        if seo_result.findings and not competitor.is_own:
+            seo_sheet_url = await _export_seo_sheet(db, run_at)
+
         notes = build_run_notes(crawl_result, checks)
         if seo_note := format_seo_note(seo_result):
             notes.append(seo_note)
@@ -851,12 +865,16 @@ async def run_crawl_for_competitor(
             message_parts.append("\n".join(notes))
         if comparisons:
             message_parts.append(format_comparison_summary(comparisons))
+        if seo_sheet_url:
+            message_parts.append(f"📊 Инфостатьи конкурента — в SEO-таблице: {seo_sheet_url}")
         await _notify_progress(
             notifier,
             db,
             competitor,
             "\n\n".join(message_parts),
-            buttons=report_buttons(competitor.id, report_url, competitor.google_drive_folder_url),
+            buttons=report_buttons(
+                competitor.id, report_url, competitor.google_drive_folder_url, seo_sheet_url=seo_sheet_url
+            ),
         )
         db.commit()
 

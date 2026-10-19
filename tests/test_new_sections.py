@@ -274,6 +274,7 @@ def test_crawl_compares_new_competitor_article_with_our_articles(env, monkeypatc
 
     monkeypatch.setattr(seo, "make_intent_cards", fake_cards)
     monkeypatch.setattr(seo, "match_articles", fake_match)
+    monkeypatch.setattr(pipeline, "export_week", lambda _db, _when: "https://sheets/week")
     article = f"{SITE}/articles/okonchanie"
     state["pages"][article] = "статья про окончание"
     state["structures"] = {article: PageStructure(h1="Окончание", main_text="окончание слова")}
@@ -284,3 +285,4 @@ def test_crawl_compares_new_competitor_article_with_our_articles(env, monkeypatc
     assert (finding.kind, finding.decision.our_url) == ("new", "https://og1.ru/polza/okonchanie")
     assert finding.page_change_id is not None
     assert any("Решения: обновить нашу — 1" in note for note in state["reports"][-1][1])
+    assert "📊 Инфостатьи конкурента — в SEO-таблице: https://sheets/week" in state["sent"][-1]

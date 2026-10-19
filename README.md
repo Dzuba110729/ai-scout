@@ -83,6 +83,13 @@ tail -f logs/app.log     # дождаться «Uvicorn running»
   User support email. После публикации перевыпустить токен:
   `python scripts/google_oauth_login.py`.
 
+- **Google Cloud → APIs & Services → Library → Google Sheets API → Enable** — в том же
+  проекте, где OAuth-приложение отчётов. Нужно для SEO-таблицы инфостатей
+  конкурентов (один файл «AI-Скаут — инфостатьи конкурентов (SEO)» в папке AI-Скаут).
+  Переавторизация не нужна: у токена уже есть полный доступ к Drive, API Таблиц его
+  принимает. Пока API выключен, обходы идут как обычно, просто без таблицы (в логе —
+  «Не удалось выгрузить SEO-таблицу … SERVICE_DISABLED»).
+
 ### Обслуживание
 
 ```bash

@@ -29,3 +29,9 @@ def _no_real_topic_match(monkeypatch):
         return [None] * len(cases)
 
     monkeypatch.setattr("app.seo.match_articles", no_match)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_seo_sheet(monkeypatch):
+    """Выгрузка в Google Таблицу ходит в сеть — в тестах обхода её нет."""
+    monkeypatch.setattr("app.pipeline.export_week", lambda _db, _when: None)

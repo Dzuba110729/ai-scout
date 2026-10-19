@@ -382,6 +382,19 @@ class ScheduleConfig(Base):
     )
 
 
+class AppState(Base):
+    """Мелкие общие настройки приложения «ключ — значение» (например, id Google Таблицы
+    SEO-находок — один файл на всех конкурентов)."""
+
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class NotificationLog(Base):
     __tablename__ = "notifications_log"
 
