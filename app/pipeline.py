@@ -375,6 +375,12 @@ def _retire_stale_section_pages(
         page.removed_at = now
 
 
+def format_seo_articles_note(count: int, sheet_url: str | None) -> str:
+    """Почему инфостатей нет в отчёте: они теперь в SEO-таблице."""
+    head = f"Находки по инфостатьям ({count}) в этот отчёт не входят — их разбор для SEO в SEO-таблице"
+    return f"{head}: {sheet_url}" if sheet_url else f"{head} (появится, когда ИИ разберёт статьи)."
+
+
 async def _export_seo_sheet(db: Session, run_at: datetime) -> str | None:
     """Лист недели в общей SEO-таблице. Не вышло — обход всё равно завершается."""
     try:
@@ -632,8 +638,10 @@ async def run_crawl_for_competitor(
         own_site = await _load_own_site_for_comparison(db, competitor)
         compare_urls: set[str] = set()
         if own_site:
+            # Статьи сравниваются со своими статьями отдельно (SEO, app/seo.py) — здесь
+            # только коммерческие страницы.
             selected = select_diffs_for_comparison(
-                [d for d in diffs if not sitewide.is_fully_sitewide(d.url)],
+                [d for d in diffs if not sitewide.is_fully_sitewide(d.url) and not is_info_url(d.url)],
                 settings.own_site_compare_max_per_run,
             )
             compare_urls = {d.url for d in selected}
@@ -698,12 +706,20 @@ async def run_crawl_for_competitor(
         comparisons: list[tuple[str, ComparisonResult]] = []
         important: list[tuple[str, AiAnalysisResult]] = []
         findings: list[RunFinding] = []
+        # Отчёт в Google Docs — для продакта: инфостатьи конкурента идут в SEO-таблицу
+        # (этап 7, 2026-10-19), здесь их нет — ни строк, ни «Важного», ни абзаца «Главное».
+        report_findings: list[RunFinding] = []
+        seo_articles = 0
         for (page_diff, page, _page_change, moved), analysis, comparison in zip(
             prepared, analyses, comparisons_by_item, strict=True
         ):
             if sitewide.is_fully_sitewide(page_diff.url):
                 continue  # вся правка страницы — сквозной блок, он ниже одной строкой
             findings.append(RunFinding(page_diff, moved, analysis, comparison))
+            if not competitor.is_own and is_info_url(page_diff.url):
+                seo_articles += 1
+                continue
+            report_findings.append(findings[-1])
             if comparison:
                 comparisons.append((page_diff.url, comparison))
             if analysis and analysis.importance == "high":
@@ -728,6 +744,7 @@ async def run_crawl_for_competitor(
         for group, analysis in zip(sitewide.groups, group_analyses, strict=True):
             finding = RunFinding(diffs_by_url[group.urls[0]], None, analysis, None, sitewide=group)
             findings.append(finding)
+            report_findings.append(finding)
             if analysis and analysis.importance == "high":
                 important.append((finding.url, analysis))
             if _is_minor(analysis):
@@ -774,6 +791,8 @@ async def run_crawl_for_competitor(
         notes = build_run_notes(crawl_result, checks)
         if seo_note := format_seo_note(seo_result):
             notes.append(seo_note)
+        if seo_articles:
+            notes.append(format_seo_articles_note(seo_articles, seo_sheet_url))
         if section_diffs:
             notes.append(format_new_sections_note([d.url for d in section_diffs]))
 
@@ -789,7 +808,7 @@ async def run_crawl_for_competitor(
         if not competitor.is_own:
             overview = await write_run_overview(
                 competitor.name,
-                build_overview_items(findings, baseline_comparisons),
+                build_overview_items(report_findings, baseline_comparisons),
                 baseline=is_baseline,
             )
         # Отчёт в Google Docs — только по конкурентам и после каждого их обхода, даже
@@ -799,11 +818,11 @@ async def run_crawl_for_competitor(
             if is_baseline:
                 report_notes = [*notes, format_baseline_note(len(diffs))]
             else:
-                report_notes = notes if report_rows else [*notes, _NO_CHANGES_NOTE]
+                report_notes = notes if report_rows or seo_articles else [*notes, _NO_CHANGES_NOTE]
             summary = build_report_summary(
                 competitor.name,
                 run_at,
-                findings,
+                report_findings,
                 baseline_pages=len(diffs) if is_baseline else None,
                 baseline_comparisons=baseline_comparisons,
                 overview=overview,

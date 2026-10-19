@@ -286,3 +286,31 @@ def test_crawl_compares_new_competitor_article_with_our_articles(env, monkeypatc
     assert finding.page_change_id is not None
     assert any("Решения: обновить нашу — 1" in note for note in state["reports"][-1][1])
     assert "📊 Инфостатьи конкурента — в SEO-таблице: https://sheets/week" in state["sent"][-1]
+    # Этап 7: в отчёте для продакта статьи нет — только строка-пояснение со ссылкой.
+    rows, notes = state["reports"][-1]
+    assert rows == []
+    assert (
+        "Находки по инфостатьям (1) в этот отчёт не входят — их разбор для SEO в SEO-таблице: https://sheets/week"
+        in notes
+    )
+
+
+def test_commercial_report_keeps_commerce_and_drops_articles(env, monkeypatch):
+    db, state = env
+    rival = _rival(db, None)
+    state["pages"] = {f"{SITE}/courses/ege": "ЕГЭ 4900"}
+    _run(db, rival)
+    compared: list = []
+
+    async def fake_compare(page_diff, _own_site):
+        compared.append(page_diff.url)
+
+    monkeypatch.setattr(pipeline, "load_own_site", lambda _db: object())
+    monkeypatch.setattr(pipeline, "compare_with_own_site", fake_compare)
+    state["pages"].update({f"{SITE}/courses/ege": "ЕГЭ 3900", f"{SITE}/articles/new": "статья"})
+    _run(db, rival)
+
+    rows, _notes = state["reports"][-1]
+    assert [row[2] for row in rows] == [f"{SITE}/courses/ege"]
+    assert compared == [f"{SITE}/courses/ege"]  # статью «есть ли у нас» здесь не сравниваем
+    assert db.query(PageChange).count() == 2  # в базе и ленте бота статья осталась
