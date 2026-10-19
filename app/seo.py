@@ -67,6 +67,7 @@ class SeoRunResult:
     merged: int = 0  # статьи, склеенные с уже известной темой (без вызова ИИ)
     not_compared: int = 0  # сравнение не успели (лимит, ИИ не ответил) — доберёт аудит
     findings: list[SeoFinding] = field(default_factory=list)
+    calls: int = 0  # сколько раз звали `claude -p` (подписка не безразмерная)
 
     def merge(self, other: "SeoRunResult") -> None:
         self.cards += other.cards
@@ -77,6 +78,7 @@ class SeoRunResult:
         self.merged += other.merged
         self.not_compared += other.not_compared
         self.findings += other.findings
+        self.calls += other.calls
 
 
 def card_from_record(record: ArticleIntent) -> IntentCard:
@@ -145,6 +147,7 @@ async def refresh_intent_cards(
             if result.limit_hit:
                 return None
             try:
+                result.calls += 1
                 return await make_intent_cards(articles)
             except ClaudeLimitError as exc:
                 result.limit_hit = True
@@ -316,6 +319,7 @@ async def match_cards(
             if result.limit_hit:
                 return None
             try:
+                result.calls += 1
                 return await match_articles([(case.article, candidates) for case, candidates in batch])
             except ClaudeLimitError as exc:
                 result.limit_hit = True
