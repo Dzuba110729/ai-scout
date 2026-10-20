@@ -145,7 +145,38 @@ class AuditStats:
     failed: int = 0
     limit_pauses: int = 0
     stopped_by_calls: bool = False
+    stopped_by_window: bool = False
 
+
+def remaining_articles(db: Session, competitors: list[Competitor]) -> int:
+    return sum(len(audit_queue(db, competitor)) for competitor in competitors)
+
+
+def nightly_competitors(db: Session) -> list[Competitor]:
+    """Кого аудировать ночью: конкуренты не на паузе и не в середине обхода."""
+    return [
+        competitor
+        for competitor in db.query(Competitor).filter(Competitor.is_own.is_(False)).order_by(Competitor.id)
+        if not competitor.is_paused and not competitor.is_crawling
+    ]
+
+
+_DECISION_LABELS = (("new", "написать новую"), ("update", "обновить нашу"), ("covered", "у нас раскрыто"))
+
+
+def format_nightly_report(stats: "AuditStats", remaining: int, sheet_url: str | None) -> str:
+    lines = [f"🌙 Ночной SEO-аудит статей конкурентов: разобрано {stats.processed}."]
+    decided = [f"{label} — {stats.decisions[key]}" for key, label in _DECISION_LABELS if stats.decisions.get(key)]
+    if decided:
+        lines.append("Решения: " + ", ".join(decided) + ".")
+    if stats.merged:
+        lines.append(f"Те же темы, что у других конкурентов (склеены): {stats.merged}.")
+    lines.append(f"Осталось разобрать: {remaining}." if remaining else "Все статьи конкурентов разобраны.")
+    if stats.limit_pauses:
+        lines.append("Упирались в лимит подписки Claude — ждали и продолжали.")
+    if sheet_url:
+        lines.append(f"Таблица, лист «Стартовый аудит»: {sheet_url}")
+    return "\n".join(lines)
 
 def in_night_window(now: datetime, start_hour: int, end_hour: int) -> bool:
     hour = now.astimezone(ZoneInfo(settings.digest_timezone)).hour
@@ -161,12 +192,16 @@ async def run_audit(
     max_calls: int,
     portion: int = 12,
     night: tuple[int, int] | None = None,
+    stop_outside_night: bool = False,
     max_articles: int | None = None,
     on_progress: Callable[[str], None] = print,
     sleep: Callable[[float], object] = asyncio.sleep,
     now: Callable[[], datetime] = lambda: datetime.now(ZoneInfo("UTC")),
 ) -> AuditStats:
-    """Аудит порциями до конца очереди, потолка вызовов ИИ или max_articles."""
+    """Аудит порциями до конца очереди, потолка вызовов ИИ или max_articles.
+
+    night — окно часов по Москве; вне окна ждём его (ручной запуск) или, при
+    stop_outside_night, заканчиваем (ночной запуск из планировщика)."""
     stats = AuditStats()
     own_articles = await asyncio.to_thread(load_own_articles, db)
     own_index = OwnArticlesIndex(own_articles) if own_articles else None
@@ -185,6 +220,10 @@ async def run_audit(
             if not queue:
                 break
             if night and not in_night_window(now(), *night):
+                if stop_outside_night:
+                    stats.stopped_by_window = True
+                    on_progress("Ночное окно закончилось — продолжим следующей ночью")
+                    return stats
                 on_progress("Вне ночного окна — ждём 15 минут")
                 await sleep(15 * 60)
                 continue

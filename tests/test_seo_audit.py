@@ -174,3 +174,54 @@ def test_estimate_counts_ready_articles_and_calls(db, sites, monkeypatch):
 
     assert (row.articles, row.ready, row.without_structure, row.done) == (7, 6, 1, 0)
     assert row.calls == 2 + 2  # 6 карточек по 4 + 6 сравнений по 3
+
+
+# --- ночной аудит из планировщика ---
+
+
+def test_nightly_run_stops_when_the_night_is_over(db, sites, monkeypatch):
+    _own, rival = sites
+    _fake_ai(monkeypatch, [])
+
+    stats = _run(
+        db, rival, portion=2, night=(1, 7), stop_outside_night=True, now=lambda: datetime(2026, 10, 19, 12, tzinfo=UTC)
+    )
+
+    assert stats.stopped_by_window and stats.processed == 0
+
+
+def test_nightly_competitors_skip_paused_and_crawling(db, sites):
+    _own, _rival = sites
+    paused = _site(db, "foxford.ru")
+    paused.is_paused = True
+    crawling = _site(db, "x.ru")
+    crawling.last_crawl_started_at = datetime(2026, 10, 19, tzinfo=UTC)
+
+    assert [c.name for c in seo_audit.nightly_competitors(db)] == ["skysmart.ru"]
+
+
+def test_nightly_job_reports_only_when_something_was_done(db, sites, monkeypatch):
+    from app import scheduler as scheduler_module
+
+    _own, _rival = sites
+    _fake_ai(monkeypatch, [])
+    told: list = []
+
+    async def fake_tell(text):
+        told.append(text)
+
+    monkeypatch.setattr(scheduler_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(scheduler_module, "_tell_owner", fake_tell)
+    monkeypatch.setattr("app.integrations.seo_sheet.export_audit", lambda _db: "https://sheets/audit")
+    monkeypatch.setattr(seo_audit, "in_night_window", lambda *_args: True)
+
+    asyncio.run(scheduler_module.run_seo_audit_nightly())
+
+    assert len(told) == 1
+    assert "🌙 Ночной SEO-аудит статей конкурентов: разобрано 5." in told[0]
+    assert "Все статьи конкурентов разобраны." in told[0]
+    assert "https://sheets/audit" in told[0]
+
+    asyncio.run(scheduler_module.run_seo_audit_nightly())  # очередь пуста — молчим
+    assert len(told) == 1

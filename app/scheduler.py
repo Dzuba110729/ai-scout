@@ -19,6 +19,7 @@ OWN_SITE_RETRY_MINUTES, до OWN_SITE_RETRY_ATTEMPTS раз; конкурент�
 там и защита от повторного запуска, и общий лимит одновременных обходов.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -323,6 +324,62 @@ def schedule_digest() -> None:
     )
 
 
+SEO_AUDIT_JOB_ID = "seo_audit_nightly"
+
+
+async def run_seo_audit_nightly() -> None:
+    """Стартовый аудит статей конкурентов порциями, ночью по Москве (app/seo_audit.py).
+
+    Пишет в Telegram, только если что-то разобрал. Когда очередь пуста — молчит:
+    новые статьи разбирает уже сам обход.
+    """
+    from app.integrations.seo_sheet import export_audit
+    from app.seo_audit import format_nightly_report, nightly_competitors, remaining_articles, run_audit
+
+    db = SessionLocal()
+    try:
+        competitors = nightly_competitors(db)
+        if not remaining_articles(db, competitors):
+            return
+        stats = await run_audit(
+            db,
+            competitors,
+            max_calls=settings.seo_audit_nightly_max_calls,
+            night=(settings.seo_audit_night_start_hour, settings.seo_audit_night_end_hour),
+            stop_outside_night=True,
+            on_progress=logger.info,
+        )
+        if not stats.processed:
+            return
+        try:
+            sheet_url = await asyncio.to_thread(export_audit, db)
+            db.commit()
+        except Exception:
+            logger.exception("Не удалось выгрузить лист «Стартовый аудит»")
+            sheet_url = None
+        await _tell_owner(format_nightly_report(stats, remaining_articles(db, competitors), sheet_url))
+    except Exception:
+        logger.exception("Ночной SEO-аудит завершился ошибкой")
+    finally:
+        db.close()
+
+
+def schedule_seo_audit() -> None:
+    if not settings.seo_audit_nightly_enabled or not settings.seo_enabled:
+        return
+    scheduler.add_job(
+        run_seo_audit_nightly,
+        trigger=CronTrigger(hour=settings.seo_audit_night_start_hour, timezone=settings.digest_timezone),
+        id=SEO_AUDIT_JOB_ID,
+        replace_existing=True,
+        # Мак спал в час ночи — догоним, если проснулся ещё до конца окна (окно
+        # проверяет сам аудит), иначе просто следующей ночью.
+        misfire_grace_time=None,
+        coalesce=True,
+        max_instances=1,
+    )
+
+
 def start_scheduler() -> None:
     db = SessionLocal()
     try:
@@ -331,5 +388,6 @@ def start_scheduler() -> None:
         db.close()
     schedule_digest()
     schedule_own_site_daily()
+    schedule_seo_audit()
     scheduler.start()
     logger.info("Планировщик запущен, ближайший плановый цикл обходов: %s", next_run.isoformat())

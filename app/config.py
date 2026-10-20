@@ -157,6 +157,14 @@ class Settings(BaseSettings):
     seo_topic_merge_threshold: float = 0.7
     # Сколько ждать ответа CLI на пачку статей — дольше, чем на одну находку.
     seo_cli_timeout_seconds: int = 300
+    # Стартовый аудит статей конкурентов идёт сам каждую ночь (app/scheduler.py):
+    # с seo_audit_night_start_hour до seo_audit_night_end_hour по Москве, не больше
+    # seo_audit_nightly_max_calls вызовов `claude -p` за ночь. Когда всё разобрано —
+    # молчит. Решение 2026-10-19 (предварительно, уточнить: владелец делегировал выбор).
+    seo_audit_nightly_enabled: bool = True
+    seo_audit_night_start_hour: int = 1
+    seo_audit_night_end_hour: int = 7
+    seo_audit_nightly_max_calls: int = 150
 
     # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
     # digest_timezone, а не по поясу Мака (Мак стоит на тихоокеанском времени, и
