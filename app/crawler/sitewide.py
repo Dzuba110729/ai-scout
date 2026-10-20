@@ -32,6 +32,9 @@ _MERGE_JACCARD = 0.8
 _MIN_OWN_LETTERS = 15
 # Сколько строк блока показывать ИИ: больше не нужно, чтобы понять, что за блок.
 _GROUP_LINES_LIMIT = 60
+# Перетасовка списка ссылок (is_link_shuffle): не меньше стольких строк, каждая короче.
+_SHUFFLE_MIN_LINES = 6
+_SHUFFLE_MAX_LINE = 60
 _LETTER_RE = re.compile(r"[a-zа-яё]", re.IGNORECASE)
 _DIGITS_RE = re.compile(r"\d[\d \u00a0]*")
 
@@ -94,6 +97,24 @@ def _meaningful(shingle: Shingle) -> bool:
 
 def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     return len(a & b) / len(a | b)
+
+
+def is_link_shuffle(lines: list[str]) -> bool:
+    """Поменялся только список коротких ссылок: одни убраны, другие добавлены.
+
+    Глоссарий onlineschool-1.ru (2026-10-20): блок «другие термины» при каждой загрузке
+    показывает случайные 20 терминов из раздела — 265 страниц «изменились» за обход.
+    Признаки: строк не меньше _SHUFFLE_MIN_LINES, все короткие и без точки в конце
+    (названия, а не предложения), убранных и добавленных — сопоставимо.
+    """
+    if len(lines) < _SHUFFLE_MIN_LINES:
+        return False
+    texts = [line[1:].strip() for line in lines]
+    if any(len(text) > _SHUFFLE_MAX_LINE or text.endswith((".", "!", "?", ":")) for text in texts):
+        return False
+    removed = sum(1 for line in lines if line.startswith("-"))
+    added = len(lines) - removed
+    return removed >= 3 and added >= 3 and max(removed, added) <= 3 * min(removed, added)
 
 
 def _drop_moved_lines(lines: list[str]) -> list[str]:
@@ -220,9 +241,12 @@ def find_sitewide_changes(diffs: list[PageDiff], min_pages: int) -> SitewideSpli
             # Остались одни цифры («+7 280», «-10 490 +990») — это цены той же акции,
             # у каждого курса свои; или обрывок текста («Узнайте свой у») от блока,
             # порезанного на этой странице иначе. Отдельной находкой это не нужно.
-            if len(_LETTER_RE.findall("".join(own_lines))) < _MIN_OWN_LETTERS:
+            if len(_LETTER_RE.findall("".join(own_lines))) < _MIN_OWN_LETTERS or is_link_shuffle(own_lines):
                 own_lines = []
             split.own_changes[url] = "\n".join(own_lines) if own_lines else None
+        elif is_link_shuffle(_drop_moved_lines(own_lines)):
+            # Сквозного блока нет, а вся правка — перетасовка ссылок: это шум.
+            split.own_changes[url] = None
 
     for cluster_index in sorted(cluster_lines, key=lambda index: -len(cluster_lines[index])):
         by_url = cluster_lines[cluster_index]

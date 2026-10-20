@@ -1465,11 +1465,25 @@ def _store_sitewide_member_analyses(
         for url in group.urls:
             group_by_url.setdefault(url, (group, analysis))
     for page_diff, _page, page_change, _moved in prepared:
-        if not sitewide.is_fully_sitewide(page_diff.url) or page_diff.url not in group_by_url:
+        if not sitewide.is_fully_sitewide(page_diff.url):
             continue
-        member = _sitewide_member_analysis(*group_by_url[page_diff.url])
+        if page_diff.url in group_by_url:
+            member = _sitewide_member_analysis(*group_by_url[page_diff.url])
+        else:
+            member = _LINK_SHUFFLE_ANALYSIS  # блока нет, вся правка — перетасовка ссылок
         if member:
             _store_analysis(db, page_change, member)
+
+
+_LINK_SHUFFLE_ANALYSIS = AiAnalysisResult(
+    category=None,
+    usp=None,
+    cta=None,
+    summary="Перетасовка блока ссылок (другие термины/статьи) — шум, не правка.",
+    raw_response={"noise": "link_shuffle"},
+    importance="low",
+    importance_reason="Случайный список ссылок меняется при каждой загрузке.",
+)
 
 
 async def _no_analysis() -> AiAnalysisResult | None:

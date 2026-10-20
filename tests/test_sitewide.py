@@ -257,3 +257,34 @@ def test_only_prices_left_besides_the_block_is_part_of_it():
     split = find_sitewide_changes(diffs, min_pages=3)
 
     assert split.is_fully_sitewide(diffs[0].url)
+
+
+TERMS_A = ["Мгновенная скорость", "Температура", "Изопроцесс", "Барионный заряд", "Калориметр", "Диод"]
+TERMS_B = ["Ядро", "Кинематика", "Гигрометр", "Анион", "Молекула", "Альфа-излучение"]
+
+
+def _glossary(term: str, others: list[str]) -> str:
+    return f"{term}\nОпределение термина {term} — это важное понятие физики.\nДругие термины\n" + "\n".join(others)
+
+
+def test_shuffled_link_list_is_noise():
+    diffs = [
+        _changed(f"https://x.ru/glossary/{i}", _glossary(f"Термин{i}", TERMS_A), _glossary(f"Термин{i}", TERMS_B))
+        for i in range(2)
+    ]
+    diffs.append(_changed("https://x.ru/a", "a", "b"))  # чтобы набралось min_pages
+    # без сквозного блока перетасовка всё равно — шум
+    split = find_sitewide_changes(
+        diffs + [_changed(f"https://x.ru/c/{s}", _course(s), _course(s, BANNER + "\n")) for s in SUBJECTS], min_pages=3
+    )
+
+    assert split.is_fully_sitewide("https://x.ru/glossary/0")
+    assert split.is_fully_sitewide("https://x.ru/glossary/1")
+
+
+def test_real_sentence_change_is_not_shuffle():
+    from app.crawler.sitewide import is_link_shuffle
+
+    lines = [f"-Старое предложение номер {i}." for i in range(4)] + [f"+Новое предложение {i}." for i in range(4)]
+    assert not is_link_shuffle(lines)
+    assert is_link_shuffle([f"-{t}" for t in TERMS_A] + [f"+{t}" for t in TERMS_B])
