@@ -21,6 +21,7 @@ from patchright.async_api import BrowserContext, Page, Response
 from app.config import settings
 from app.crawler.blocking import blocked_reason, is_blocked
 from app.crawler.diff import extract_text
+from app.crawler.recheck import DisappearReason, check_missing_pages
 from app.crawler.structure import PageStructure, extract_structure
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,10 @@ class CrawlResult:
     # не обвал всего обхода, а точечный пропуск: страница будет перепроверена в
     # следующий раз. См. цикл загрузки в crawl_competitor.
     failed_urls: list[str] = field(default_factory=list)
+    # Страницы, которые карта сайта вдруг перестала показывать целыми разделами, хотя
+    # они открываются (см. find_sitemap_gaps): раздел -> сколько страниц взяли из
+    # прошлого снимка. Владельцу об этом пишется в пояснениях к обходу.
+    restored_from_previous: dict[str, int] = field(default_factory=dict)
 
     @property
     def is_truncated(self) -> bool:
@@ -431,6 +436,103 @@ def plan_crawl(
     )
 
 
+# Карта сайта, потерявшая целые разделы (2026-10-19: у onlineschool-1.ru /sitemap.xml
+# стал пустым, осталась только карта энциклопедии — блог, вопросы, новости, курсы,
+# ~3200 живых страниц, пропали из списка). Без защиты обход перестаёт их видеть: в
+# удалённые их не пишет перепроверка (страницы открываются), но ни изменений, ни
+# новых статей по ним больше нет. Поэтому пропавший раздел берём из прошлого снимка —
+# если несколько его страниц правда открываются.
+SITEMAP_GAP_MIN_SECTION_PAGES = 10  # раздел целиком пропал из карты — от стольких страниц
+SITEMAP_GAP_MASS_MIN_PAGES = 50  # карта потеряла сразу много страниц…
+SITEMAP_GAP_MASS_SHARE = 0.5  # …и не меньше этой доли прошлого снимка — карта сломана
+SITEMAP_GAP_SAMPLE_SIZE = 5  # сколько страниц пропавшего раздела проверяем запросом
+WHOLE_MAP_GAP = "*"
+
+
+@dataclass(frozen=True)
+class SitemapGap:
+    section: str  # «/blog»; WHOLE_MAP_GAP — карта потеряла страницы по всему сайту
+    urls: list[str]
+
+
+def _section_of(url: str) -> str:
+    first = urlparse(url).path.strip("/").split("/", 1)[0]
+    return f"/{first}"
+
+
+def find_sitemap_gaps(entries: list[SitemapEntry], previous_pages: dict[str, PreviousPageInfo]) -> list[SitemapGap]:
+    """Страницы прошлого снимка, которые карта сайта потеряла не по одной, а оптом.
+
+    Карта потеряла больше половины прошлого снимка (и не меньше 50 страниц) — это
+    поломка карты, а не удаление: один «пробел» на все пропавшие страницы. Иначе
+    пробел — раздел (первая часть адреса, /blog), у которого в карте не осталось ни
+    одной страницы, а в прошлом снимке их было не меньше 10. Одиночные пропажи —
+    обычная жизнь сайта, ими занимается перепроверка (app/crawler/recheck.py).
+    """
+    live = {entry.url for entry in entries}
+    missing = sorted(url for url in previous_pages if url not in live)
+    if not missing:
+        return []
+    if len(missing) >= SITEMAP_GAP_MASS_MIN_PAGES and len(missing) >= SITEMAP_GAP_MASS_SHARE * len(previous_pages):
+        return [SitemapGap(section=WHOLE_MAP_GAP, urls=missing)]
+
+    live_sections = {_section_of(url) for url in live}
+    by_section: dict[str, list[str]] = {}
+    for url in missing:
+        by_section.setdefault(_section_of(url), []).append(url)
+    return [
+        SitemapGap(section=section, urls=urls)
+        for section, urls in sorted(by_section.items())
+        if section not in live_sections and len(urls) >= SITEMAP_GAP_MIN_SECTION_PAGES
+    ]
+
+
+def _spread_sample(urls: list[str], size: int) -> list[str]:
+    """Равномерно по отсортированному списку — так в выборку попадают разные разделы."""
+    if len(urls) <= size:
+        return list(urls)
+    step = len(urls) / size
+    return [urls[int(index * step)] for index in range(size)]
+
+
+async def _gap_pages_alive(urls: list[str]) -> bool:
+    """Большинство страниц выборки открываются по своему адресу. Сайт не ответил или
+    закрыт проверкой «не робот» — вердикта нет, раздел не спасаем (дальше обычная
+    перепроверка, она тоже не объявит страницы удалёнными без ответа сайта)."""
+    sample = _spread_sample(urls, SITEMAP_GAP_SAMPLE_SIZE)
+    checks = await check_missing_pages(sample, max_pages=len(sample))
+    alive = sum(1 for check in checks.values() if check.reason is DisappearReason.STILL_ALIVE)
+    return alive * 2 > len(sample)
+
+
+async def restore_sitemap_gaps(
+    entries: list[SitemapEntry], previous_pages: dict[str, PreviousPageInfo]
+) -> tuple[list[SitemapEntry], dict[str, int]]:
+    """Добавляет в список карты сайта страницы из пропавших разделов, если они живы.
+
+    Дата у них прежняя (из прошлого снимка), поэтому plan_crawl их просто переносит, а
+    в полную сверку раз в месяц — грузит. Новые страницы такого раздела, пока сайт не
+    починит карту, не видны — об этом пишется в пояснениях к обходу.
+    """
+    restored: list[SitemapEntry] = []
+    counts: dict[str, int] = {}
+    for gap in find_sitemap_gaps(entries, previous_pages):
+        if not await _gap_pages_alive(gap.urls):
+            continue
+        restored += [SitemapEntry(url=url, lastmod=previous_pages[url].lastmod) for url in gap.urls]
+        if gap.section == WHOLE_MAP_GAP:
+            for url in gap.urls:
+                counts[_section_of(url)] = counts.get(_section_of(url), 0) + 1
+        else:
+            counts[gap.section] = len(gap.urls)
+        logger.warning(
+            "Карта сайта потеряла %s стр. (%s), но они открываются — берём из прошлого снимка",
+            len(gap.urls),
+            "весь сайт" if gap.section == WHOLE_MAP_GAP else gap.section,
+        )
+    return sorted(entries + restored, key=lambda entry: entry.url), counts
+
+
 async def _goto_through_challenge(page: Page, url: str) -> tuple[int, str] | None:
     """Открывает url и возвращает (HTTP-статус, html). None — страница не ответила.
 
@@ -744,11 +846,13 @@ async def crawl_competitor(
     """
     previous_pages = previous_pages or {}
     include_paths = include_paths or []
-    entries = [
-        entry
-        for entry in await discover_sitemap_entries(base_url, sitemap_url)
-        if path_included(entry.url, include_paths)
-    ]
+    discovered = await discover_sitemap_entries(base_url, sitemap_url)
+    entries = [entry for entry in discovered if path_included(entry.url, include_paths)]
+    restored_counts: dict[str, int] = {}
+    # Сайт без карты (обход по ссылкам) сюда не попадает: там список страниц и так
+    # каждый раз собирается заново, сравнивать с картой нечего.
+    if previous_pages and (discovered or any(info.lastmod for info in previous_pages.values())):
+        entries, restored_counts = await restore_sitemap_gaps(entries, previous_pages)
 
     sitemap_lastmod_by_url: dict[str, datetime | None] = {}
     if entries:
@@ -801,7 +905,7 @@ async def crawl_competitor(
     if on_urls_discovered:
         await on_urls_discovered(len(to_fetch))
 
-    result = CrawlResult(base_url=base_url, urls_total=urls_total)
+    result = CrawlResult(base_url=base_url, urls_total=urls_total, restored_from_previous=restored_counts)
     result.pages.update(carry_over)
 
     fetched = await _fetch_all(

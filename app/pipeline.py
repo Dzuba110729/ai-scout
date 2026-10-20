@@ -1009,6 +1009,17 @@ def build_run_notes(crawl_result: CrawlResult, checks: dict[str, MissingPageChec
             "Попробуем ещё раз в следующем обходе."
         )
 
+    if crawl_result.restored_from_previous:
+        restored = crawl_result.restored_from_previous
+        biggest = sorted(restored, key=lambda section: -restored[section])[:5]
+        sections = ", ".join(f"{section} ({restored[section]})" for section in biggest)
+        notes.append(
+            f"Карта сайта конкурента перестала показывать страниц: {sum(restored.values())} "
+            f"(разделы {sections}{' и др.' if len(restored) > len(biggest) else ''}), "
+            "но они открываются. Удалёнными их не считаем, следим по прошлому списку; "
+            "новые страницы этих разделов не увидим, пока сайт не починит карту."
+        )
+
     moved = sum(1 for c in checks.values() if c.reason is DisappearReason.MOVED)
     if moved:
         notes.append(f"Страниц переехало на новый адрес: {moved}.")
