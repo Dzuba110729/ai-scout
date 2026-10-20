@@ -334,7 +334,12 @@ async def run_seo_audit_nightly() -> None:
     новые статьи разбирает уже сам обход.
     """
     from app.integrations.seo_sheet import export_audit
-    from app.seo_audit import format_nightly_report, nightly_competitors, remaining_articles, run_audit
+    from app.seo_audit import (
+        format_nightly_report,
+        nightly_competitors,
+        remaining_articles,
+        run_audit,
+    )
 
     db = SessionLocal()
     try:
