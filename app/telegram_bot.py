@@ -64,20 +64,23 @@ logger = logging.getLogger(__name__)
 router = Router(name="ai_scout_menu")
 
 BTN_SUMMARY = "📊 Сводка"
+BTN_SEO = "🔍 SEO-темы"
 BTN_COMPETITORS = "🏢 Конкуренты"
 BTN_CHANGES = "🆕 Находки"
+BTN_SETTINGS = "⚙️ Настройки"
+# Кнопки прошлой версии меню (до 2026-10-20). В меню их больше нет — обходы идут сами,
+# отчёты есть в «Сводке», помощь — /help, — но у кого-то в чате может остаться старая
+# клавиатура, поэтому нажатия по-прежнему работают.
 BTN_REPORTS = "📄 Отчёты"
 BTN_CRAWL_ALL = "🔄 Обойти всех"
 BTN_CRAWL_OWN = "🔄 Обойти наш сайт"
-BTN_SETTINGS = "⚙️ Настройки"
 BTN_HELP = "❓ Помощь"
 
 MAIN_KB = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_COMPETITORS)],
-        [KeyboardButton(text=BTN_CHANGES), KeyboardButton(text=BTN_REPORTS)],
-        [KeyboardButton(text=BTN_CRAWL_ALL), KeyboardButton(text=BTN_CRAWL_OWN)],
-        [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_HELP)],
+        [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_SEO)],
+        [KeyboardButton(text=BTN_CHANGES), KeyboardButton(text=BTN_COMPETITORS)],
+        [KeyboardButton(text=BTN_SETTINGS)],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -88,6 +91,7 @@ BOT_COMMANDS = [
     BotCommand(command="start", description="Главное меню"),
     BotCommand(command="summary", description="Сводка"),
     BotCommand(command="competitors", description="Конкуренты"),
+    BotCommand(command="seo", description="SEO-темы: что написать и что обновить"),
     BotCommand(command="changes", description="Последние находки"),
     BotCommand(command="digest", description="Дайджест за неделю"),
     BotCommand(command="reports", description="Отчёты об обходах"),
@@ -108,13 +112,13 @@ MAX_SCHEDULE_DAYS = 90
 HELP_TEXT = """❓ Что умеет бот
 
 Кнопки внизу чата — всегда под рукой:
-— 📊 Сводка: что происходит сейчас, сколько находок, когда следующий обход
-— 🏢 Конкуренты: список, карточка, обход, пауза, добавление и удаление
-— 🆕 Находки: лента новых, изменённых и удалённых страниц с фильтрами; нажмите номер — откроется подробный разбор
-— 📄 Отчёты: ссылки на последние отчёты в Google Docs и папки со всеми отчётами
-— 🔄 Обойти всех: запустить обход всех конкурентов прямо сейчас
-— 🔄 Обойти наш сайт: проверить, что изменилось на og1.ru — итог придёт, когда обход закончится
-— ⚙️ Настройки: как часто обходить, что подключено
+— 📊 Сводка: что происходит сейчас, сколько находок, всё ли работает; там же отчёты и дайджест
+— 🔍 SEO-темы: статьи конкурентов против наших — что написать, что обновить, ссылка на Google Таблицу
+— 🆕 Находки: лента новых, изменённых и удалённых страниц с фильтрами (в том числе «для SEO» и «для продакта»); нажмите номер — откроется подробный разбор
+— 🏢 Конкуренты: список, карточка, обход, пауза, добавление и удаление; там же «Обойти всех»
+— ⚙️ Настройки: как часто обходить, что подключено, обход нашего сайта
+
+Обходы идут сами: конкуренты — по расписанию, наш сайт — каждое утро.
 
 После каждого обхода бот сам пришлёт итог, 🔥 важные находки и кнопку «📄 Открыть отчёт».
 Раз в неделю — дайджест: главное за неделю, чего нет у нас, что требует внимания.
@@ -139,7 +143,7 @@ HELP_TEXT = """❓ Что умеет бот
 вашего Chrome: откройте сайт → Cookie-Editor → Export → JSON → пришлите файл
 (или вставьте текст) сюда. Бот сам сохранит их, удалит сообщение и начнёт обход.
 
-/start — вернуть меню, если оно пропало."""
+/start — вернуть меню, если оно пропало. /help — эта подсказка."""
 
 
 class AddCompetitor(StatesGroup):
@@ -273,7 +277,8 @@ def _changes_screen(db, scope: str, kind: str, page: int) -> tuple[str, InlineKe
     rows = [
         [_btn(str(i), f"chd:{c.id}:{scope}:{kind}:{result.page}") for i, c in enumerate(result.items, start=1)],
         filters[:2],
-        filters[2:],
+        filters[2:5],
+        filters[5:],
     ]
     nav = []
     if result.page > 1:
@@ -361,6 +366,7 @@ def _own_site_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
         [
             [action, _btn("🔄 Обновить", "sec:own_site")],
             [_btn("🆕 Изменения на нашем сайте", f"chg:c{own.id}:all:1")],
+            [_btn("← К настройкам", "sec:settings")],
         ]
     )
 
@@ -368,11 +374,47 @@ def _own_site_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
 def _settings_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
     presets = [_btn(label, f"set:{days}:{hours}") for label, days, hours in SCHEDULE_PRESETS]
     text = bot_views.settings_text(db) + f"\n\nДайджест: {digest.schedule_label()} (меняется в .env: DIGEST_*)"
-    return text, _kb([presets[:2], presets[2:], [_btn("🔄 Обновить", "sec:settings")]])
+    return text, _kb(
+        [
+            presets[:2],
+            presets[2:],
+            [_btn("🌐 Наш сайт: обход и изменения", "sec:own_site")],
+            [_btn("🔄 Обновить", "sec:settings")],
+        ]
+    )
+
+
+def _seo_screen(db) -> tuple[str, InlineKeyboardMarkup | None]:
+    sheet = bot_views.seo_sheet_url(db)
+    return bot_views.seo_text(db), _kb(
+        [
+            [_btn(bot_views.SEO_DECISION_LABELS["new"], "seo:new:1"), _btn(bot_views.SEO_DECISION_LABELS["update"], "seo:update:1")],
+            [_url_btn("📊 Открыть таблицу", sheet)] if sheet else [],
+            [_btn("📚 Находки для SEO", "chg:all:seo:1"), _btn("🔄 Обновить", "sec:seo")],
+        ]
+    )
+
+
+def _topics_screen(db, decision: str, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    if decision not in bot_views.SEO_DECISION_LABELS:
+        decision = "new"
+    result = bot_views.load_topics(db, decision, page)
+    nav = []
+    if result.page > 1:
+        nav.append(_btn("◀️", f"seo:{decision}:{result.page - 1}"))
+    if result.total_pages > 1:
+        nav.append(_btn(f"{result.page}/{result.total_pages}", f"seo:{decision}:{result.page}"))
+    if result.page < result.total_pages:
+        nav.append(_btn("▶️", f"seo:{decision}:{result.page + 1}"))
+    sheet = bot_views.seo_sheet_url(db)
+    return bot_views.topics_text(result, decision), _kb(
+        [nav, [_url_btn("📊 Таблица", sheet)] if sheet else [], [_btn("← К SEO-темам", "sec:seo")]]
+    )
 
 
 SECTION_SCREENS = {
     "summary": _summary_screen,
+    "seo": _seo_screen,
     "competitors": _competitors_screen,
     "reports": _reports_screen,
     "own_site": _own_site_screen,
@@ -559,6 +601,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
 
 _COMMAND_SECTIONS = {
     "summary": "summary",
+    "seo": "seo",
     "competitors": "competitors",
     "changes": "changes",
     "digest": "digest",
@@ -569,6 +612,7 @@ _COMMAND_SECTIONS = {
 
 _BUTTON_SECTIONS = {
     BTN_SUMMARY: "summary",
+    BTN_SEO: "seo",
     BTN_COMPETITORS: "competitors",
     BTN_CHANGES: "changes",
     BTN_REPORTS: "reports",
@@ -584,15 +628,26 @@ async def cmd_section(message: Message, state: FSMContext) -> None:
     await _show_section(message, _COMMAND_SECTIONS.get(command, "summary"))
 
 
+_LEGACY_BUTTONS = {BTN_REPORTS, BTN_CRAWL_ALL, BTN_CRAWL_OWN, BTN_HELP}
+
+
+async def _refresh_keyboard_if_legacy(message: Message) -> None:
+    """Нажата кнопка старого меню — значит, у человека старая клавиатура: присылаем новую."""
+    if message.text in _LEGACY_BUTTONS:
+        await message.answer("Меню обновилось — новые кнопки внизу чата.", reply_markup=MAIN_KB)
+
+
 @router.message(F.text.in_(_BUTTON_SECTIONS))
 async def menu_button(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await _refresh_keyboard_if_legacy(message)
     await _show_section(message, _BUTTON_SECTIONS[message.text])
 
 
 @router.message(F.text == BTN_CRAWL_ALL)
 async def menu_crawl_all(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await _refresh_keyboard_if_legacy(message)
     db = SessionLocal()
     try:
         result = crawl_manager.start_all(db)
@@ -604,6 +659,7 @@ async def menu_crawl_all(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_CRAWL_OWN)
 async def menu_crawl_own(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await _refresh_keyboard_if_legacy(message)
     db = SessionLocal()
     try:
         text, markup = await _execute(db, AssistantAction("crawl_own"))
@@ -705,6 +761,18 @@ async def cb_change_detail(callback: CallbackQuery) -> None:
             await callback.answer("Находка не найдена", show_alert=True)
             return
         text, markup = _change_detail_screen(db, change, back)
+    finally:
+        db.close()
+    await _show(callback, text, markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.regexp(r"^seo:\w+:\d+$"))
+async def cb_topics(callback: CallbackQuery) -> None:
+    _, decision, page = callback.data.split(":")
+    db = SessionLocal()
+    try:
+        text, markup = _topics_screen(db, decision, int(page))
     finally:
         db.close()
     await _show(callback, text, markup)

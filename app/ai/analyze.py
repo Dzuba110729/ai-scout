@@ -8,6 +8,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -38,6 +39,11 @@ _limit_pause_until = 0.0
 
 def _limit_pause_left() -> float:
     return max(0.0, _limit_pause_until - time.monotonic())
+
+
+def limit_pause_minutes_left() -> int:
+    """Сколько минут ещё не вызываем CLI после «limit reached» (0 — паузы нет)."""
+    return math.ceil(_limit_pause_left() / 60)
 
 
 def _start_limit_pause() -> None:

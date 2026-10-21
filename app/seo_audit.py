@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.ai import analyze
@@ -146,6 +147,46 @@ class AuditStats:
     limit_pauses: int = 0
     stopped_by_calls: bool = False
     stopped_by_window: bool = False
+
+
+@dataclass
+class AuditProgress:
+    competitor: str
+    articles: int  # статьи в отслеживаемых инфоразделах
+    done: int  # уже разобраны (есть SEO-находка)
+    ready: int  # ждут ночного аудита
+    waiting_structure: int  # без структуры — появится после ближайшего обхода
+
+
+def audit_progress(db: Session) -> list[AuditProgress]:
+    """Сколько статей конкурентов разобрано и сколько впереди — для экрана бота.
+
+    Тот же отбор, что у audit_queue, но одним запросом на конкурента: у onlineschool-1
+    ~3000 статей, ленивая подгрузка структуры по одной заметно тормозила бы кнопку."""
+    result = []
+    for competitor in db.query(Competitor).filter(Competitor.is_own.is_(False)).order_by(Competitor.id):
+        paths = competitor_include_paths(competitor.include_paths, is_own=False)
+        rows = (
+            db.query(Page.id, Page.url, PageStructureRecord.id, func.length(PageStructureRecord.main_text))
+            .outerjoin(PageStructureRecord, PageStructureRecord.page_id == Page.id)
+            .filter(Page.competitor_id == competitor.id, Page.is_removed.is_(False))
+            .all()
+        )
+        done_ids = {pid for (pid,) in db.query(SeoFinding.page_id).filter(SeoFinding.competitor_id == competitor.id)}
+        progress = AuditProgress(competitor.name, 0, 0, 0, 0)
+        for page_id, url, structure_id, text_len in rows:
+            if not (is_info_url(url) and path_included(url, paths)):
+                continue
+            progress.articles += 1
+            if page_id in done_ids:
+                progress.done += 1
+            elif structure_id is None:
+                progress.waiting_structure += 1
+            elif (text_len or 0) >= _MIN_TEXT:
+                progress.ready += 1
+        if progress.articles:
+            result.append(progress)
+    return result
 
 
 def remaining_articles(db: Session, competitors: list[Competitor]) -> int:

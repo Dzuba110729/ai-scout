@@ -233,3 +233,113 @@ def test_bad_schedule_is_not_applied(db, days, hours):
     assert text.startswith("Не поменял")
     config = telegram_bot.bot_views.get_schedule_config(db)
     assert (config.interval_days, config.interval_hours) == (7, 0)
+
+
+# ---------------------------------------------------------------- меню v3 (2026-10-20)
+
+
+def test_main_menu_has_five_buttons_and_seo():
+    texts = [button.text for row in telegram_bot.MAIN_KB.keyboard for button in row]
+
+    assert texts == [
+        telegram_bot.BTN_SUMMARY,
+        telegram_bot.BTN_SEO,
+        telegram_bot.BTN_CHANGES,
+        telegram_bot.BTN_COMPETITORS,
+        telegram_bot.BTN_SETTINGS,
+    ]
+    # Старые кнопки убраны из меню, но нажатия по ним ещё работают.
+    assert telegram_bot.BTN_REPORTS in telegram_bot._BUTTON_SECTIONS
+    assert telegram_bot.BTN_HELP in telegram_bot._BUTTON_SECTIONS
+
+
+def test_changes_feed_filters_by_audience(db):
+    rival = db.query(Competitor).filter_by(is_own=False).one()
+    page = Page(competitor_id=rival.id, url="https://foxford.ru/wiki/drobi", title="Дроби")
+    db.add(page)
+    db.flush()
+    db.add(PageChange(page_id=page.id, change_type=ChangeType.NEW, detected_at=NOW))
+    db.commit()
+
+    seo = bot_views.load_changes(db, kind="seo", page_size=50)
+    product = bot_views.load_changes(db, kind="product", page=2, page_size=5)
+
+    assert [c.page.url for c in seo.items] == ["https://foxford.ru/wiki/drobi"]
+    assert seo.total == 1
+    assert product.total == 12  # остальные — курсы, цены и т.п.
+    assert len(product.items) == 5
+    assert all("/wiki/" not in c.page.url for c in product.items)
+
+
+def _topic(db, rival, decision, topic, url, *, kind="audit"):
+    from app.models import SeoFinding, TopicDecision
+
+    page = Page(competitor_id=rival.id, url=url)
+    db.add(page)
+    db.flush()
+    item = TopicDecision(
+        topic=topic,
+        main_intent="узнать",
+        decision=decision,
+        our_url="https://og1.ru/polza/drobi" if decision == "update" else None,
+        add_subintents=["примеры с ответами"] if decision == "update" else None,
+        argument="у нас такого нет",
+    )
+    db.add(item)
+    db.flush()
+    db.add(SeoFinding(decision_id=item.id, page_id=page.id, competitor_id=rival.id, kind=kind))
+    db.commit()
+    return item
+
+
+def test_seo_screen_and_topic_list(db):
+    rival = db.query(Competitor).filter_by(is_own=False).one()
+    _topic(db, rival, "new", "Деление с остатком", "https://foxford.ru/wiki/delenie")
+    _topic(db, rival, "update", "Сложение дробей", "https://foxford.ru/wiki/drobi", kind="new")
+
+    text, markup = telegram_bot._seo_screen(db)
+    topics_text, topics_markup = telegram_bot._topics_screen(db, "update", 1)
+
+    assert "Стартовый аудит, всего: ✍️ Написать новую — 1" in text
+    assert "За 7 дней в обходах: 🔧 Обновить нашу — 1" in text
+    assert "«Сложение дробей»" in topics_text
+    assert "Наша статья: https://og1.ru/polza/drobi" in topics_text
+    assert "Добавить: примеры с ответами" in topics_text
+    assert "Деление" not in topics_text
+    for m in (markup, topics_markup):
+        for row in m.inline_keyboard:
+            for button in row:
+                assert not button.callback_data or len(button.callback_data.encode()) <= 64
+
+
+def test_summary_reports_health(db, monkeypatch):
+    from app.integrations.google_docs import GoogleDocsClient
+
+    monkeypatch.setattr(GoogleDocsClient, "is_configured", property(lambda _self: True))
+    monkeypatch.setattr(bot_views.shutil, "which", lambda _path: "/usr/bin/claude")
+    monkeypatch.setattr(bot_views.analyze, "limit_pause_minutes_left", lambda: 0)
+    own = db.query(Competitor).filter_by(is_own=True).one()
+    own.last_crawl_finished_at = NOW
+    db.commit()
+
+    assert "Состояние: ✅ всё в порядке" in bot_views.summary_text(db)
+
+    rival = db.query(Competitor).filter_by(is_own=False).one()
+    rival.cookies_only = True
+    monkeypatch.setattr(bot_views.analyze, "limit_pause_minutes_left", lambda: 42)
+    db.commit()
+    summary = bot_views.summary_text(db)
+
+    assert "лимит подписки Claude" in summary and "~42 мин" in summary
+    assert "🍪 Фоксфорд" in summary
+
+
+def test_cookies_reminder_names_cookie_sites(db):
+    from app.scheduler import format_cookies_reminder
+
+    rival = db.query(Competitor).filter_by(is_own=False).one()
+    rival.cookies_only = True
+    db.commit()
+
+    text = format_cookies_reminder(db)
+    assert "Фоксфорд" in text and "Cookie-Editor" in text

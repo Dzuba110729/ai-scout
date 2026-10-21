@@ -72,7 +72,9 @@ SYSTEM_PROMPT = """Ты — помощник в Telegram-боте «AI-Скау�
 - set_schedule {days, hours} — интервал плановых обходов, например раз в неделю: days=7, hours=0;
 - show {section, competitor_id?, kind?} — показать раздел с кнопками. section: summary (сводка),
   competitors (список или карточка конкурента, если указан competitor_id), changes (лента находок;
-  kind: all|important|new|changed|removed; можно competitor_id), reports (ссылки на отчёты),
+  kind: all|important|new|changed|removed|seo|product — seo: инфостатьи для SEO-специалиста,
+  product: коммерческое для продакта; можно competitor_id), reports (ссылки на отчёты),
+  seo (SEO-темы: что написать, что обновить, прогресс аудита статей, ссылка на SEO-таблицу),
   own_changes (что изменилось на нашем сайте), own_site (статус обхода нашего сайта),
   digest (дайджест за неделю), settings, help. Используй show, когда человек хочет
   «посмотреть/открыть/показать» список, отчёт, дайджест и т.п.

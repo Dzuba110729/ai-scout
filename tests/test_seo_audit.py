@@ -225,3 +225,23 @@ def test_nightly_job_reports_only_when_something_was_done(db, sites, monkeypatch
 
     asyncio.run(scheduler_module.run_seo_audit_nightly())  # очередь пуста — молчим
     assert len(told) == 1
+
+
+def test_audit_progress_counts_without_loading_pages(db, sites):
+    from app.models import TopicDecision
+
+    _own, rival = sites
+    decision = TopicDecision(topic="Окончание", main_intent="узнать", decision="covered")
+    db.add(decision)
+    db.flush()
+    page = db.query(Page).filter_by(url="https://skysmart.ru/articles/a0").one()
+    db.add(SeoFinding(decision_id=decision.id, page_id=page.id, competitor_id=rival.id, kind="audit"))
+    db.commit()
+
+    (progress,) = seo_audit.audit_progress(db)
+
+    assert progress.competitor == "skysmart.ru"
+    assert progress.articles == 7  # 5 статей + без структуры + короткая; /vpr исключён, /courses — не статья
+    assert progress.done == 1
+    assert progress.ready == 4
+    assert progress.waiting_structure == 1

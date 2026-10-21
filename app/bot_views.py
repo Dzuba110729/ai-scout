@@ -15,6 +15,8 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
+from app import content_kind
+from app.ai import analyze
 from app.config import settings
 from app.models import (
     AiAnalysis,
@@ -23,7 +25,9 @@ from app.models import (
     Page,
     PageChange,
     PageFetchCache,
+    SeoFinding,
     SessionStatus,
+    TopicDecision,
 )
 from app.own_site import get_own_site
 from app.scheduler import get_schedule_config
@@ -43,13 +47,16 @@ CHANGE_EMOJI = {
 }
 
 # Фильтр ленты в callback_data -> тип изменения (None — все; «important» — не тип,
-# а оценка важности от ИИ, обрабатывается в load_changes отдельно).
+# а оценка важности от ИИ; «seo»/«product» — для кого находка, см. CONTENT_FILTERS;
+# оба обрабатываются в load_changes отдельно).
 CHANGE_KINDS: dict[str, ChangeType | None] = {
     "all": None,
     "important": None,
     "new": ChangeType.NEW,
     "changed": ChangeType.CHANGED,
     "removed": ChangeType.REMOVED,
+    "seo": None,
+    "product": None,
 }
 
 CHANGE_KIND_LABELS = {
@@ -58,7 +65,13 @@ CHANGE_KIND_LABELS = {
     "new": "🆕 Новые",
     "changed": "✏️ Изменения",
     "removed": "🗑 Удалённые",
+    "seo": "📚 Для SEO",
+    "product": "🛒 Для продакта",
 }
+
+# Фильтр «для кого» — то же деление, что колонка «Для кого» в отчёте (app/content_kind.py):
+# инфостатьи — SEO-специалисту, остальное — продакту.
+CONTENT_FILTERS = {"seo": content_kind.INFO, "product": content_kind.COMMERCE}
 
 IMPORTANT_MARK = "🔥"
 
@@ -189,7 +202,47 @@ def summary_text(db: Session) -> str:
         )
         lines.append(f"🌐 Наш сайт: {own.base_url}, {state}")
 
+    problems = health_problems(db, competitors, own, now)
+    lines.append("")
+    lines.append("Состояние: " + ("✅ всё в порядке" if not problems else "есть что поправить"))
+    lines += [f"— {problem}" for problem in problems]
+
     return "\n".join(lines)
+
+
+# Сайт «по свежим кукам» дольше этого без обхода — напоминаем в сводке.
+COOKIES_STALE_DAYS = 7
+# Наш сайт обходится каждый день; не обходился дольше — что-то не так.
+OWN_SITE_STALE_DAYS = 2
+
+
+def health_problems(db: Session, competitors: list[Competitor], own: Competitor | None, now: datetime) -> list[str]:
+    """Что мешает работе прямо сейчас — одной строкой на проблему, пусто, если всё хорошо."""
+    from app.integrations.google_docs import GoogleDocsClient
+
+    problems = []
+    if not (shutil.which(settings.claude_cli_path) or Path(settings.claude_cli_path).exists()):
+        problems.append("❌ Не найден Claude Code CLI — находки остаются без разбора ИИ")
+    else:
+        pause = analyze.limit_pause_minutes_left()
+        if pause:
+            problems.append(f"⏸ Упёрлись в лимит подписки Claude: разбор ИИ продолжится через ~{pause} мин")
+    if not GoogleDocsClient().is_configured:
+        problems.append("❌ Google не подключён — отчёты и SEO-таблица не выгружаются")
+
+    def _older(value: datetime | None, days: int) -> bool:
+        if value is None:
+            return True
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return now - value > timedelta(days=days)
+
+    for c in competitors:
+        if c.cookies_only and not c.is_paused and not c.is_crawling and _older(c.last_crawl_finished_at, COOKIES_STALE_DAYS):
+            problems.append(f"🍪 {c.name}: обход больше {COOKIES_STALE_DAYS} дней не шёл — пришлите свежие куки")
+    if own is not None and not own.is_crawling and _older(own.last_crawl_finished_at, OWN_SITE_STALE_DAYS):
+        problems.append(f"🌐 Наш сайт не обходился больше {OWN_SITE_STALE_DAYS} дней")
+    return problems
 
 
 def _next_crawl_label(competitor: Competitor) -> str:
@@ -277,25 +330,29 @@ def load_changes(
     def _base(stmt):
         return stmt.join(Page).join(Competitor).outerjoin(AiAnalysis).where(*conditions)
 
-    total = db.scalar(_base(select(func.count(PageChange.id)).select_from(PageChange))) or 0
+    order = (PageChange.detected_at.desc(), PageChange.id.desc())
+    audience = CONTENT_FILTERS.get(kind)
+    if audience is not None:
+        # «Для кого» решается по адресу страницы регуляркой — в SQL её не перенести
+        # (тесты на SQLite), поэтому отбираем по лёгким колонкам, а целиком грузим
+        # только находки одной страницы ленты.
+        rows = db.execute(_base(select(PageChange.id, Page.url, AiAnalysis.category)).order_by(*order)).all()
+        ids = [cid for cid, url, category in rows if content_kind.content_kind(url, category) == audience]
+        total = len(ids)
+    else:
+        total = db.scalar(_base(select(func.count(PageChange.id)).select_from(PageChange))) or 0
     total_pages = max((total + page_size - 1) // page_size, 1)
     page = min(max(page, 1), total_pages)
 
-    items = (
-        db.execute(
-            _base(select(PageChange))
-            .options(
-                joinedload(PageChange.page).joinedload(Page.competitor),
-                joinedload(PageChange.ai_analysis),
-            )
-            .order_by(PageChange.detected_at.desc(), PageChange.id.desc())
-            .offset((page - 1) * page_size)
-            .limit(page_size)
-        )
-        .unique()
-        .scalars()
-        .all()
+    stmt = _base(select(PageChange)).options(
+        joinedload(PageChange.page).joinedload(Page.competitor),
+        joinedload(PageChange.ai_analysis),
     )
+    if audience is not None:
+        stmt = stmt.where(PageChange.id.in_(ids[(page - 1) * page_size : page * page_size]))
+    else:
+        stmt = stmt.offset((page - 1) * page_size).limit(page_size)
+    items = db.execute(stmt.order_by(*order)).unique().scalars().all()
     return ChangesPage(items=list(items), page=page, total_pages=total_pages, total=total)
 
 
@@ -351,6 +408,135 @@ def reports_text(db: Session) -> str:
             lines.append(f"— {c.name}: отчётов ещё не было")
     lines += ["", "Кнопки ниже открывают последний отчёт и папку со всеми отчётами."]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- SEO-темы
+
+SEO_DECISION_LABELS = {
+    "new": "✍️ Написать новую",
+    "update": "🔧 Обновить нашу",
+    "covered": "✅ У нас раскрыто",
+}
+SEO_TOPICS_PAGE_SIZE = 6
+
+
+def seo_sheet_url(db: Session) -> str | None:
+    from app.integrations.seo_sheet import SPREADSHEET_STATE_KEY, get_state
+
+    spreadsheet_id = get_state(db, SPREADSHEET_STATE_KEY)
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit" if spreadsheet_id else None
+
+
+def _decision_counts(db: Session, *, kinds: tuple[str, ...], since: datetime | None = None) -> dict[str, int]:
+    """Сколько тем с каким решением — по находкам заданного вида (тема считается один раз)."""
+    stmt = (
+        select(TopicDecision.decision, func.count(func.distinct(TopicDecision.id)))
+        .join(SeoFinding, SeoFinding.decision_id == TopicDecision.id)
+        .where(SeoFinding.kind.in_(kinds))
+        .group_by(TopicDecision.decision)
+    )
+    if since is not None:
+        stmt = stmt.where(SeoFinding.detected_at >= since)
+    return dict(db.execute(stmt).all())
+
+
+def _decisions_line(counts: dict[str, int]) -> str:
+    parts = [f"{label} — {counts[key]}" for key, label in SEO_DECISION_LABELS.items() if counts.get(key)]
+    return ", ".join(parts) if parts else "пока нет"
+
+
+def seo_text(db: Session) -> str:
+    from app.seo_audit import audit_progress
+
+    now = datetime.now(UTC)
+    lines = [
+        "🔍 SEO-темы: статьи конкурентов против наших",
+        "",
+        f"За 7 дней в обходах: {_decisions_line(_decision_counts(db, kinds=('new', 'changed'), since=now - timedelta(days=7)))}",
+        f"Стартовый аудит, всего: {_decisions_line(_decision_counts(db, kinds=('audit',)))}",
+    ]
+
+    progress = audit_progress(db)
+    if progress:
+        lines += ["", "Разбор уже опубликованных статей:"]
+        left = 0
+        for p in progress:
+            line = f"— {p.competitor}: {p.done} из {p.articles}"
+            if p.ready:
+                line += f", в очереди {p.ready}"
+            if p.waiting_structure:
+                line += f", ещё {p.waiting_structure} ждут обхода"
+            lines.append(line)
+            left += p.ready
+        if left:
+            lines.append(
+                f"Аудит идёт сам каждую ночь {settings.seo_audit_night_start_hour:02d}:00–"
+                f"{settings.seo_audit_night_end_hour:02d}:00 МСК, до {settings.seo_audit_nightly_max_calls} "
+                "обращений к ИИ за ночь."
+            )
+        else:
+            lines.append("Очередь аудита пуста: новые статьи разбираются в обычных обходах.")
+
+    if seo_sheet_url(db) is None:
+        lines += ["", "Таблица появится после первой выгрузки (обход с находками по статьям или ночной аудит)."]
+    else:
+        lines += ["", "Все темы с аргументами — в Google Таблице (кнопка ниже), её можно переслать SEO-специалисту."]
+    return "\n".join(lines)
+
+
+@dataclass
+class TopicsPage:
+    items: list[TopicDecision]
+    page: int
+    total_pages: int
+    total: int
+
+
+def load_topics(db: Session, decision: str, page: int = 1, page_size: int = SEO_TOPICS_PAGE_SIZE) -> TopicsPage:
+    """Темы с данным решением, свежие сверху, вместе с адресами статей конкурентов."""
+    total = db.scalar(select(func.count(TopicDecision.id)).where(TopicDecision.decision == decision)) or 0
+    total_pages = max((total + page_size - 1) // page_size, 1)
+    page = min(max(page, 1), total_pages)
+    items = (
+        db.execute(
+            select(TopicDecision)
+            .where(TopicDecision.decision == decision)
+            .options(joinedload(TopicDecision.findings).joinedload(SeoFinding.page))
+            .order_by(TopicDecision.updated_at.desc(), TopicDecision.id.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        .unique()
+        .scalars()
+        .all()
+    )
+    return TopicsPage(items=list(items), page=page, total_pages=total_pages, total=total)
+
+
+def topic_line(topic: TopicDecision) -> str:
+    lines = [f"«{_shorten(topic.topic, 120)}»"]
+    if topic.material_type:
+        lines[0] += f" · {topic.material_type}"
+    urls = list(dict.fromkeys(f.page.url for f in topic.findings if f.page is not None))
+    lines += urls[:2]
+    if len(urls) > 2:
+        lines.append(f"…и ещё {len(urls) - 2}")
+    if topic.decision == "update" and topic.our_url:
+        lines.append(f"Наша статья: {topic.our_url}")
+    if topic.add_subintents:
+        lines.append("Добавить: " + _shorten("; ".join(str(s) for s in topic.add_subintents[:3]), 200))
+    elif topic.argument:
+        lines.append(_shorten(topic.argument, 200))
+    return "\n".join(lines)
+
+
+def topics_text(result: TopicsPage, decision: str) -> str:
+    header = f"{SEO_DECISION_LABELS.get(decision, decision)}: темы"
+    if not result.items:
+        return f"{header}\n\nПока ничего нет."
+    blocks = [f"{header}\nСтраница {result.page} из {result.total_pages}, всего {result.total}"]
+    blocks += [topic_line(t) for t in result.items]
+    return "\n\n".join(blocks)
 
 
 def integrations_status() -> list[str]:

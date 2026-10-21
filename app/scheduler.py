@@ -148,6 +148,26 @@ async def _crawl_own_site(
     return None
 
 
+def format_cookies_reminder(db) -> str:
+    """Плановый цикл не обходит сайты «только по свежим кукам» (foxford: кука живёт
+    ~час, бот её не продлевает) — без напоминания о них легко забыть."""
+    names = [
+        c.name
+        for c in db.query(Competitor)
+        .filter(Competitor.cookies_only.is_(True), Competitor.is_paused.is_(False), Competitor.is_own.is_(False))
+        .order_by(Competitor.id)
+    ]
+    return (
+        f"🍪 Плановый обход идёт, но {', '.join(names) or 'часть конкурентов'} обходится только по свежим "
+        "кукам — сам бот туда не пройдёт.\n\n"
+        "Как запустить (2–3 минуты):\n"
+        "1. Откройте сайт в обычном Chrome, убедитесь, что он открылся.\n"
+        "2. Cookie-Editor → Export → JSON.\n"
+        "3. Пришлите выгрузку сюда файлом или текстом — бот удалит сообщение и сразу начнёт обход.\n\n"
+        "Сделайте это сразу после выгрузки: кука живёт около часа."
+    )
+
+
 async def run_crawl_cycle(attempt: int = 0) -> None:
     """Плановый цикл: наш сайт целиком, затем все конкуренты (кроме тех, что на паузе).
 
@@ -189,6 +209,8 @@ async def run_crawl_cycle(attempt: int = 0) -> None:
             result.skipped_running,
             result.skipped_paused,
         )
+        if result.skipped_cookies_only:
+            await _tell_owner(format_cookies_reminder(db))
 
         job = scheduler.get_job(CYCLE_JOB_ID)
         config = get_schedule_config(db)
