@@ -16,6 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app import bot_views, telegram_bot
 from app.ai import assistant
 from app.ai.assistant import AssistantAction, build_prompt, parse_reply
+from app.scheduler import get_schedule_config
 from app.competitor_ops import normalize_url
 from app.db import Base
 from app.models import AiAnalysis, ChangeType, Competitor, Page, PageChange, SessionStatus
@@ -231,7 +232,7 @@ def test_bad_schedule_is_not_applied(db, days, hours):
     text, _ = asyncio.run(telegram_bot._execute(db, AssistantAction("set_schedule", {"days": days, "hours": hours})))
 
     assert text.startswith("Не поменял")
-    config = telegram_bot.bot_views.get_schedule_config(db)
+    config = get_schedule_config(db)
     assert (config.interval_days, config.interval_hours) == (7, 0)
 
 

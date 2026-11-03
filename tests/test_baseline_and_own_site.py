@@ -162,30 +162,33 @@ def test_own_site_long_list_is_trimmed():
 # ---------------------------------------------------------------- расписание
 
 from datetime import UTC, datetime, timedelta  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 from app.scheduler import plan_next_run  # noqa: E402
 
-NOW = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
-WEEK = timedelta(days=7)
+NOW = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)  # среда
 
 
-def test_restart_keeps_saved_schedule():
-    # Раньше каждый перезапуск сервиса ставил «через неделю от сейчас» — и при
-    # перезапусках чаще раза в неделю плановый обход не наступал никогда.
-    saved = NOW + timedelta(days=3)
+def test_next_cycle_is_sunday_0300_moscow():
+    planned, overdue = plan_next_run(NOW + timedelta(days=3), NOW, reset=False)
 
-    assert plan_next_run(saved, WEEK, NOW, reset=False) == saved
+    assert not overdue
+    local = planned.astimezone(ZoneInfo("Europe/Moscow"))
+    assert (local.year, local.month, local.day, local.hour, local.weekday()) == (2026, 11, 8, 3, 6)
 
 
 def test_overdue_cycle_runs_soon_after_start():
-    planned = plan_next_run(NOW - timedelta(days=2), WEEK, NOW, reset=False)
+    planned, overdue = plan_next_run(NOW - timedelta(days=2), NOW, reset=False)
 
+    assert overdue
     assert NOW < planned <= NOW + timedelta(minutes=5)
 
 
-def test_first_setup_and_interval_change_start_from_now():
-    assert plan_next_run(None, WEEK, NOW, reset=False) == NOW + WEEK
-    assert plan_next_run(NOW + timedelta(days=3), WEEK, NOW, reset=True) == NOW + WEEK
+def test_first_setup_waits_for_sunday():
+    planned, overdue = plan_next_run(None, NOW, reset=False)
+
+    assert not overdue
+    assert planned.astimezone(ZoneInfo("Europe/Moscow")).weekday() == 6
 
 
 def _new(url: str) -> PageDiff:

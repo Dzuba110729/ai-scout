@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     google_service_account_json_path: str = ""
 
     crawl_interval_days: int = 7
+    # Плановый цикл обходов: день недели (cron) и час по Москве. С 2026-11-03 вместо
+    # «раз в N дней» — каждое воскресенье в 03:00 МСК (решение владельца).
+    crawl_cycle_day_of_week: str = "sun"
+    crawl_cycle_hour: int = 3
     crawl_request_delay_seconds: float = 2.0
     # Сколько ждать, пока JS-проверка «вы не робот» пройдёт сама (см. _goto_through_challenge).
     crawl_challenge_wait_seconds: float = 15.0
@@ -110,8 +114,10 @@ class Settings(BaseSettings):
     # чтобы сравнение находок конкурента всегда шло с актуальной версией нашего сайта,
     # когда бы ни запустили обход конкурента. Час — по часовому поясу ниже, а не Мака
     # (решение владельца 2026-09-29).
+    # С 2026-11-03 — не каждый день, а раз в own_site_every_days дней (решение владельца).
     own_site_daily_enabled: bool = True
     own_site_daily_hour: int = 5
+    own_site_every_days: int = 2
     own_site_daily_timezone: str = "Europe/Moscow"
     # Наш сайт не открылся (нет интернета, сайт лёг, защита не пустила) — обход
     # повторяется через own_site_retry_minutes, всего до own_site_retry_attempts
@@ -165,6 +171,8 @@ class Settings(BaseSettings):
     seo_audit_night_start_hour: int = 1
     seo_audit_night_end_hour: int = 7
     seo_audit_nightly_max_calls: int = 150
+    # Ночной аудит идёт не каждую ночь, а раз в seo_audit_every_days дней (2026-11-03).
+    seo_audit_every_days: int = 3
 
     # Еженедельный дайджест в Telegram (app/digest.py). День — mon..sun, час — по
     # digest_timezone, а не по поясу Мака (Мак стоит на тихоокеанском времени, и

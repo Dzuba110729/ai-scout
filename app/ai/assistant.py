@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session
 from app import bot_views
 from app.ai.analyze import ClaudeCliError, extract_json_object, run_claude_cli
 from app.own_site import get_own_site
-from app.scheduler import get_schedule_config
+from app.scheduler import schedule_label
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ SYSTEM_PROMPT = """Ты — помощник в Telegram-боте «AI-Скау�
 - crawl_own {} — обойти наш сайт (он фиксированный, адрес не меняется), итог бот пришлёт сам;
 - add_competitor {name, url} — добавить конкурента (url сайта, можно без https://);
 - delete_competitor {competitor_id} — удалить конкурента со всей историей (бот сам спросит подтверждение);
-- set_schedule {days, hours} — интервал плановых обходов, например раз в неделю: days=7, hours=0;
+- set_schedule {days, hours} — расписание фиксированное (воскресенье 03:00 МСК), действие вернёт отказ;
 - show {section, competitor_id?, kind?} — показать раздел с кнопками. section: summary (сводка),
   competitors (список или карточка конкурента, если указан competitor_id), changes (лента находок;
   kind: all|important|new|changed|removed|seo|product — seo: инфостатьи для SEO-специалиста,
@@ -146,10 +146,9 @@ history = _History()
 def build_context(db: Session) -> str:
     """Срез данных для модели: только то, что нужно для ответа, без текстов страниц."""
     now = datetime.now(UTC)
-    config = get_schedule_config(db)
     lines = [
         f"Сейчас: {bot_views.fmt_dt(now)}",
-        f"Расписание плановых обходов: {bot_views.fmt_interval(config.interval_days, config.interval_hours)}",
+        f"Расписание плановых обходов: {schedule_label()}",
         "",
         "Конкуренты:",
     ]

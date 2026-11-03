@@ -30,7 +30,7 @@ from app.models import (
     TopicDecision,
 )
 from app.own_site import get_own_site
-from app.scheduler import get_schedule_config
+from app.scheduler import schedule_label
 
 CHANGES_PAGE_SIZE = 8
 
@@ -155,7 +155,6 @@ def _counts_line(counts: dict[ChangeType, int]) -> str:
 
 def summary_text(db: Session) -> str:
     competitors = list_competitors(db)
-    config = get_schedule_config(db)
     now = datetime.now(UTC)
 
     lines = ["📊 Сводка", ""]
@@ -184,7 +183,7 @@ def summary_text(db: Session) -> str:
 
         upcoming = [c.next_crawl_at for c in competitors if c.next_crawl_at and not c.is_paused]
         lines.append("")
-        lines.append(f"Расписание: {fmt_interval(config.interval_days, config.interval_hours)}")
+        lines.append(f"Расписание: {schedule_label()}")
         lines.append(f"Ближайший плановый обход: {fmt_dt(min(upcoming)) if upcoming else '—'}")
 
         finished = [c for c in competitors if c.last_crawl_finished_at]
@@ -553,12 +552,11 @@ def integrations_status() -> list[str]:
 
 
 def settings_text(db: Session) -> str:
-    config = get_schedule_config(db)
     lines = [
         "⚙️ Настройки",
         "",
-        f"Расписание обходов: {fmt_interval(config.interval_days, config.interval_hours)}",
-        "Выберите новый интервал кнопкой ниже или напишите, например: «обходи раз в 3 дня».",
+        f"Расписание обходов: {schedule_label()}",
+        "Наш сайт обходится раз в 2 дня, SEO-аудит идёт раз в 3 ночи. Меняется в .env.",
         "",
         "Подключения:",
         *integrations_status(),

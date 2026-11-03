@@ -78,6 +78,9 @@ class SheetFinding:
     detected_at: datetime | None = None
 
 
+EMPTY_WEEK_NOTE = "За эту неделю новых и изменённых инфостатей конкурентов не найдено."
+
+
 def _domain(url: str) -> str:
     return urlparse(url).netloc.removeprefix("www.")
 
@@ -116,6 +119,7 @@ def build_sheet_rows(findings: list[SheetFinding], tz: ZoneInfo | None = None) -
         groups.setdefault(item.decision_id, []).append(item)
 
     rows = []
+    row_dates = []
     for items in groups.values():
         head = items[0]
         dates = [item.detected_at for item in items if item.detected_at]
@@ -128,6 +132,7 @@ def build_sheet_rows(findings: list[SheetFinding], tz: ZoneInfo | None = None) -
             usp = "Подинтенты: " + "; ".join(shown) if shown else ""
             if len(head.subintents) > len(shown):
                 usp += f" (и ещё {len(head.subintents) - len(shown)})"
+        row_dates.append(min(dates) if dates else datetime.min.replace(tzinfo=tz))
         rows.append(
             [
                 min(dates).astimezone(tz).strftime("%d.%m.%Y") if dates else "",
@@ -141,7 +146,9 @@ def build_sheet_rows(findings: list[SheetFinding], tz: ZoneInfo | None = None) -
                 _what_to_add(head),
             ]
         )
-    return rows
+    # Свежее сверху: лист открывают, чтобы увидеть новое, а не начало истории.
+    order = sorted(range(len(rows)), key=lambda i: row_dates[i], reverse=True)
+    return [rows[i] for i in order]
 
 
 def week_bounds(when: datetime, tz: ZoneInfo | None = None) -> tuple[datetime, datetime, str]:
@@ -342,7 +349,11 @@ def export_week(db: Session, when: datetime) -> str | None:
     """Лист недели, в которую попал обход. Ссылка на лист или None (Google не настроен,
     API Таблиц выключен, сеть). Блокирующая — из обхода только через asyncio.to_thread."""
     start, end, title = week_bounds(when)
-    return _export(db, title, build_sheet_rows(load_sheet_findings(db, start=start, end=end)), index=0)
+    rows = build_sheet_rows(load_sheet_findings(db, start=start, end=end))
+    if not rows:
+        # Лист недели всё равно нужен: пустая неделя — тоже результат обхода.
+        rows = [["", "", "", "", "", EMPTY_WEEK_NOTE, "", "", ""]]
+    return _export(db, title, rows, index=0)
 
 
 def export_audit(db: Session) -> str | None:

@@ -1,14 +1,14 @@
 """Планировщик обходов (APScheduler, без Celery/Redis — см. CLAUDE.md).
 
-Плановый обход — один общий цикл раз в интервал (ScheduleConfig, по умолчанию
-неделя, меняется в UI и в боте): сначала наш сайт, до конца, и только потом все
+Плановый обход — один общий цикл, каждое воскресенье в 03:00 по Москве
+(CRAWL_CYCLE_DAY_OF_WEEK / CRAWL_CYCLE_HOUR): сначала наш сайт, до конца, и только потом все
 конкуренты. Порядок важен: находки конкурентов сравниваются с нашим сайтом («есть
 ли у нас такое»), и сравнивать нужно со свежей его версией. Раньше у каждого сайта
 был свой независимый таймер, и конкурент мог обойтись раньше нашего сайта.
 
-Когда будет следующий цикл, хранится в БД (ScheduleConfig.next_run_at), а не
-только в памяти планировщика: иначе каждый перезапуск сервиса отодвигал бы обход
-на полный интервал, и при перезапусках чаще раза в неделю он не наступал никогда.
+Когда был назначен цикл, хранится в БД (ScheduleConfig.next_run_at): если сервис
+или Мак были выключены в назначенное время, просроченный цикл запускается вскоре
+после старта, а не пропадает до следующего воскресенья.
 
 Если наш сайт не открылся (нет интернета, сайт лёг), его обход повторяется через
 OWN_SITE_RETRY_MINUTES, до OWN_SITE_RETRY_ATTEMPTS раз; конкуренты в плановом цикле
@@ -44,6 +44,7 @@ CYCLE_JOB_ID = "crawl_cycle"
 OWN_SITE_DAILY_JOB_ID = "own_site_daily"
 DIGEST_JOB_ID = "weekly_digest"
 CYCLE_RETRY_JOB_ID = "crawl_cycle_retry"
+CYCLE_OVERDUE_JOB_ID = "crawl_cycle_overdue"
 OWN_SITE_DAILY_RETRY_JOB_ID = "own_site_daily_retry"
 
 _MOSCOW = ZoneInfo("Europe/Moscow")
@@ -63,8 +64,14 @@ def get_schedule_config(db) -> ScheduleConfig:
     return config
 
 
-def interval_timedelta(config: ScheduleConfig) -> timedelta:
-    return timedelta(days=config.interval_days, hours=config.interval_hours)
+_WEEKDAYS = {"mon": "понедельникам", "tue": "вторникам", "wed": "средам", "thu": "четвергам", "fri": "пятницам",
+             "sat": "субботам", "sun": "воскресеньям"}
+
+
+def schedule_label() -> str:
+    """Человеческое описание планового цикла для бота и веба."""
+    day = _WEEKDAYS.get(settings.crawl_cycle_day_of_week, settings.crawl_cycle_day_of_week)
+    return f"по {day} в {settings.crawl_cycle_hour:02d}:00 МСК"
 
 
 def _aware(value: datetime | None) -> datetime | None:
@@ -74,19 +81,23 @@ def _aware(value: datetime | None) -> datetime | None:
     return value
 
 
-def plan_next_run(saved: datetime | None, interval: timedelta, now: datetime, *, reset: bool) -> datetime:
-    """Когда запускать следующий цикл.
+def cycle_trigger() -> CronTrigger:
+    return CronTrigger(
+        day_of_week=settings.crawl_cycle_day_of_week, hour=settings.crawl_cycle_hour, timezone=_MOSCOW
+    )
 
-    reset=False (старт сервиса): сохранённое время уважаем, просроченное — вскоре
-    после старта. reset=True (сменили интервал) или времени ещё нет — через
-    интервал от сейчас.
+
+def plan_next_run(saved: datetime | None, now: datetime, *, reset: bool) -> tuple[datetime, bool]:
+    """Когда ближайший плановый цикл и просрочен ли прошлый.
+
+    Возвращает (время, просрочен). Просрочен — сохранённое время цикла прошло, а
+    цикл не отработал (сервис или Мак были выключены): запускаем вскоре после старта.
+    reset=True или времени ещё нет — просто ближайшее воскресенье.
     """
     saved = _aware(saved)
-    if reset or saved is None:
-        return now + interval
-    if saved <= now + _OVERDUE_DELAY:
-        return now + _OVERDUE_DELAY
-    return saved
+    if not reset and saved is not None and saved <= now + _OVERDUE_DELAY:
+        return now + _OVERDUE_DELAY, True
+    return cycle_trigger().get_next_fire_time(None, now), False
 
 
 def _show_next_run(db, next_run: datetime) -> None:
@@ -214,7 +225,7 @@ async def run_crawl_cycle(attempt: int = 0) -> None:
 
         job = scheduler.get_job(CYCLE_JOB_ID)
         config = get_schedule_config(db)
-        next_run = job.next_run_time if job is not None else datetime.now(UTC) + interval_timedelta(config)
+        next_run = job.next_run_time if job is not None else cycle_trigger().get_next_fire_time(None, datetime.now(UTC))
         config.next_run_at = next_run
         db.add(config)
         _show_next_run(db, next_run)
@@ -264,7 +275,11 @@ def schedule_own_site_daily() -> None:
         return
     scheduler.add_job(
         run_own_site_daily,
-        trigger=CronTrigger(hour=settings.own_site_daily_hour, timezone=settings.own_site_daily_timezone),
+        trigger=IntervalTrigger(
+            days=settings.own_site_every_days,
+            start_date=datetime(2026, 11, 4, settings.own_site_daily_hour, tzinfo=ZoneInfo(settings.own_site_daily_timezone)),
+            timezone=settings.own_site_daily_timezone,
+        ),
         id=OWN_SITE_DAILY_JOB_ID,
         replace_existing=True,
         # Мак спал в назначенный час — обойти, как только проснулся.
@@ -277,12 +292,19 @@ def schedule_own_site_daily() -> None:
 def schedule_cycle(db, *, reset: bool = False) -> datetime:
     """Ставит (или переставляет) плановый цикл. Возвращает время ближайшего запуска."""
     config = get_schedule_config(db)
-    interval = interval_timedelta(config)
-    next_run = plan_next_run(config.next_run_at, interval, datetime.now(UTC), reset=reset)
+    next_run, overdue = plan_next_run(config.next_run_at, datetime.now(UTC), reset=reset)
 
+    if overdue:
+        scheduler.add_job(
+            run_crawl_cycle,
+            trigger=DateTrigger(run_date=next_run),
+            id=CYCLE_OVERDUE_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=None,
+        )
     scheduler.add_job(
         run_crawl_cycle,
-        trigger=IntervalTrigger(days=config.interval_days, hours=config.interval_hours, start_date=next_run),
+        trigger=cycle_trigger(),
         id=CYCLE_JOB_ID,
         replace_existing=True,
         # Мак спал в момент срабатывания — обойти, как только проснулся, а не
@@ -308,22 +330,9 @@ def sync_next_run(db, competitor: Competitor) -> None:
 
 
 def set_interval(db, days: int, hours: int) -> ScheduleConfig:
-    """Меняет интервал плановых обходов — и из веба, и из бота.
-
-    ValueError — интервал нулевой или отрицательный.
-    """
-    if days < 0 or hours < 0 or (days == 0 and hours == 0):
-        raise ValueError("Интервал должен быть больше нуля")
-
-    config = get_schedule_config(db)
-    config.interval_days = days
-    config.interval_hours = hours
-    db.add(config)
-    db.commit()
-
-    schedule_cycle(db, reset=True)
-    db.refresh(config)
-    return config
+    """Раньше менял интервал плановых обходов. С 2026-11-03 цикл идёт по расписанию
+    (воскресенье 03:00 МСК, настройки CRAWL_CYCLE_* в .env), менять его из UI нельзя."""
+    raise ValueError(f"расписание фиксированное: {schedule_label()}; меняется в .env (CRAWL_CYCLE_*)")
 
 
 async def _run_digest() -> None:
@@ -396,7 +405,11 @@ def schedule_seo_audit() -> None:
         return
     scheduler.add_job(
         run_seo_audit_nightly,
-        trigger=CronTrigger(hour=settings.seo_audit_night_start_hour, timezone=settings.digest_timezone),
+        trigger=IntervalTrigger(
+            days=settings.seo_audit_every_days,
+            start_date=datetime(2026, 11, 4, settings.seo_audit_night_start_hour, tzinfo=ZoneInfo(settings.digest_timezone)),
+            timezone=settings.digest_timezone,
+        ),
         id=SEO_AUDIT_JOB_ID,
         replace_existing=True,
         # Мак спал в час ночи — догоним, если проснулся ещё до конца окна (окно

@@ -92,12 +92,34 @@ def test_daily_run_crawls_only_own_site_quietly(db, monkeypatch):
     assert calls == [("Наш сайт", True)]
 
 
-def test_daily_own_site_job_runs_at_moscow_hour():
+def test_own_site_job_runs_every_two_days_at_moscow_hour():
     scheduler_module.schedule_own_site_daily()
     try:
         job = scheduler_module.scheduler.get_job(scheduler_module.OWN_SITE_DAILY_JOB_ID)
+        assert job.trigger.interval.days == 2
         assert str(job.trigger.timezone) == "Europe/Moscow"
-        assert "hour='5'" in str(job.trigger)
+        assert job.trigger.start_date.hour == 5
+    finally:
+        scheduler_module.scheduler.remove_all_jobs()
+
+
+def test_seo_audit_job_runs_every_three_days():
+    scheduler_module.schedule_seo_audit()
+    try:
+        job = scheduler_module.scheduler.get_job(scheduler_module.SEO_AUDIT_JOB_ID)
+        assert job.trigger.interval.days == 3
+        assert job.trigger.start_date.hour == 1
+    finally:
+        scheduler_module.scheduler.remove_all_jobs()
+
+
+def test_cycle_job_runs_on_sunday_0300_moscow(db):
+    scheduler_module.schedule_cycle(db, reset=True)
+    try:
+        job = scheduler_module.scheduler.get_job(scheduler_module.CYCLE_JOB_ID)
+        text = str(job.trigger)
+        assert "day_of_week='sun'" in text and "hour='3'" in text
+        assert str(job.trigger.timezone) == "Europe/Moscow"
     finally:
         scheduler_module.scheduler.remove_all_jobs()
 

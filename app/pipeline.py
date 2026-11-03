@@ -785,7 +785,7 @@ async def run_crawl_for_competitor(
         )
 
         seo_sheet_url = None
-        if seo_result.findings and not competitor.is_own:
+        if not competitor.is_own and not is_baseline:
             seo_sheet_url = await _export_seo_sheet(db, run_at)
 
         notes = build_run_notes(crawl_result, checks)

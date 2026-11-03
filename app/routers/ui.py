@@ -13,7 +13,7 @@ from app.db import get_db
 from app.diff_view import build_side_by_side
 from app.models import ChangeType, Competitor, Page, PageChange, PageFetchCache, SessionStatus
 from app.own_site import get_own_site
-from app.scheduler import get_schedule_config
+from app.scheduler import get_schedule_config, schedule_label
 
 router = APIRouter(dependencies=[Depends(require_basic_auth)])
 templates = Jinja2Templates(directory=str(BASE_DIR / "app" / "templates"))
@@ -286,6 +286,7 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         {
             "active_nav": "settings",
             "schedule": schedule,
+            "schedule_label": schedule_label(),
             "own_site": own_site,
             "own_site_pages_count": own_site_pages_count,
             "own_site_crawl_progress": own_site_crawl_progress,
